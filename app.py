@@ -20,7 +20,7 @@ def index():
 @app.route("/chat", methods=["POST"])
 def chat():
     message = request.json["message"]
-    model_name = request.json.get("model", "gemini-1.5-flash-latest")
+    model_name = request.json.get("model", "models/gemini-flash-latest")
 
     try:
         model = genai.GenerativeModel(model_name)
