@@ -8,76 +8,289 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
         body {
-            background-color: #f8f9fa;
-        }
-        .chat-container {
-            height: 70vh;
+            background-color: #212121; /* ダークモード背景 */
+            color: #e0e0e0; /* 明るいテキスト色 */
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             display: flex;
             flex-direction: column;
-            background-color: white;
+            min-height: 100vh;
         }
-        .chat-messages {
+        .container-fluid {
+            padding: 0;
+        }
+        .header {
+            background-color: #303030;
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #424242;
+            color: #ffffff;
+            font-size: 1.1rem;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        .header .icons button {
+            background: none;
+            border: none;
+            color: #ffffff;
+            font-size: 1.3rem;
+            margin-left: 0.75rem;
+            padding: 0;
+            cursor: pointer;
+        }
+        .chat-main {
             flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center; /* メッセージを中央寄せにする */
+            justify-content: center; /* メッセージを中央寄せにする */
+            padding: 1.5rem;
             overflow-y: auto;
-            padding: 1rem;
+            max-width: 800px; /* チャット幅を制限 */
+            margin: 0 auto; /* 中央寄せ */
+        }
+        .chat-messages-container {
+            width: 100%; /* メッセージ表示領域の幅 */
+            max-height: calc(100vh - 160px); /* ヘッダーとフッターを考慮した高さ */
+            overflow-y: auto;
+            padding-bottom: 1rem; /* 入力欄との隙間 */
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end; /* 下から上にメッセージを積み上げる */
         }
         .message-row {
             display: flex;
             margin-bottom: 0.75rem;
+            max-width: 100%;
         }
         .message-content {
-            padding: 0.5rem 1rem;
-            border-radius: 1rem;
-            max-width: 75%;
+            padding: 0.75rem 1rem;
+            border-radius: 1.2rem;
             word-wrap: break-word;
+            font-size: 1rem;
+            line-height: 1.5;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
         }
         .user-message {
             justify-content: flex-end;
         }
         .user-message .message-content {
-            background-color: #0d6efd;
+            background-color: #0d6efd; /* 青系 */
             color: white;
-            border-bottom-right-radius: 0.25rem;
+            border-bottom-right-radius: 0.5rem; /* ちょっと角を落とす */
         }
         .model-message {
             justify-content: flex-start;
         }
         .model-message .message-content {
-            background-color: #e9ecef;
-            color: #212529;
-            border-bottom-left-radius: 0.25rem;
+            background-color: #424242; /* 少し明るい灰色 */
+            color: #ffffff;
+            border-bottom-left-radius: 0.5rem; /* ちょっと角を落とす */
         }
-        .chat-input {
+        .welcome-message {
+            text-align: center;
+            font-size: 1.5rem;
+            color: #e0e0e0;
+            height: 100%; /* 垂直中央寄せのために必要 */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .chat-input-area {
+            background-color: #303030;
+            padding: 1rem 1.5rem;
+            border-top: 1px solid #424242;
+            position: sticky;
+            bottom: 0;
+            width: 100%;
+            max-width: 800px; /* 入力欄も幅を制限 */
+            margin: 0 auto; /* 中央寄せ */
+            box-sizing: border-box; /* paddingがwidthに含まれるように */
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .input-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .input-controls .btn-icon {
+            background: none;
+            border: none;
+            color: #9e9e9e;
+            font-size: 1.3rem;
+            padding: 0;
+            cursor: pointer;
+        }
+        .model-dropdown-button {
+            background-color: #424242;
+            color: #e0e0e0;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 1.5rem;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .model-dropdown-button:hover {
+            background-color: #525252;
+            color: #ffffff;
+        }
+        .form-check-input:checked {
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+        }
+        .form-check-label {
+            color: #e0e0e0;
+        }
+        .message-input-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            width: 100%;
+        }
+        .message-input {
+            background-color: #424242;
+            border: 1px solid #616161;
+            color: #e0e0e0;
+            border-radius: 1.5rem;
+            padding: 0.75rem 1.25rem;
+            flex-grow: 1;
+            resize: none; /* リサイズを禁止 */
+            min-height: 44px; /* 最低の高さ */
+            overflow-y: hidden; /* デフォルトでスクロールバーを非表示 */
+        }
+        .message-input:focus {
+            background-color: #525252;
+            border-color: #0d6efd;
+            box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.25);
+            color: #ffffff;
+        }
+        .send-button {
+            background-color: #0d6efd;
+            color: white;
+            border-radius: 50%; /* 丸いボタン */
+            width: 44px;
+            height: 44px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.2rem;
             flex-shrink: 0;
+            cursor: pointer;
+            border: none;
+        }
+        .send-button:hover {
+            background-color: #0b5ed7;
+        }
+        .dropdown-menu {
+            background-color: #424242;
+            border: 1px solid #616161;
+        }
+        .dropdown-item {
+            color: #e0e0e0;
+        }
+        .dropdown-item:hover {
+            background-color: #525252;
+            color: #ffffff;
+        }
+        .logout-link {
+            color: #e0e0e0;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .logout-link:hover {
+            color: #ffffff;
         }
     </style>
 </head>
 <body>
-    <h1 class="h4 mb-0">これは新しいデザインのテストです</h1>
-    <div id="chat-container"></div>
-    <div id="controls">
-        <select id="model-selector">
-    <option value="models/gemini-flash-latest">Flash (高速)</option>
-    <option value="models/gemini-pro-latest">Pro (高精度)</option>
-</select>
-        <input type="text" id="message-input" placeholder="メッセージを入力...">
-        <button onclick="sendMessage()">送信</button>
+    <div class="container py-4">
+        <header class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+            <h1 class="h4 mb-0">AIチャット</h1>
+            <a href="/logout" class="btn btn-outline-secondary btn-sm">ログアウト</a>
+        </header>
+
+        <main>
+            <div class="card shadow-sm">
+                <div class="card-body p-0 chat-container">
+                    <div id="chat-messages" class="chat-messages">
+                        {% for msg in messages %}
+                            <div class="message-row {{ 'user-message' if msg.sender == 'user' else 'model-message' }}">
+                                <div class="message-content">
+                                    {{ msg.content.replace('\n', '<br>') | safe }}
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    
+                    <div class="chat-input p-3 bg-light border-top">
+                        <div class="input-group">
+                             <select id="model-selector" class="form-select" style="max-width: 120px;">
+                                <option value="models/gemini-flash-latest">Flash</option>
+                                <option value="models/gemini-pro-latest">Pro</option>
+                            </select>
+                            <input type="text" id="message-input" class="form-control" placeholder="メッセージを入力...">
+                            <button class="btn btn-primary" type="button" onclick="sendMessage()">
+                                <i class="bi bi-send-fill"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         const chatMessages = document.getElementById('chat-messages');
         const messageInput = document.getElementById('message-input');
-        const modelSelector = document.getElementById('model-selector');
+        const modelSelectorDisplay = document.getElementById('model-selector-display');
+        const selectedModelText = document.getElementById('selected-model-text');
+        const webSearchToggle = document.getElementById('web-search-toggle');
+
+        // モデル選択のドロップダウン初期設定
+        let currentModel = "models/gemini-flash-latest"; // デフォルトモデル
+
+        document.querySelectorAll('.dropdown-item').forEach(item => {
+            item.addEventListener('click', function(event) {
+                event.preventDefault();
+                currentModel = this.dataset.value;
+                selectedModelText.textContent = this.textContent.split(' ')[0]; // 'Flash' or 'Pro'
+            });
+        });
 
         function scrollToBottom() {
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            if (chatMessages) { // chatMessagesが存在する場合のみスクロール
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
         }
         
-        window.onload = scrollToBottom;
+        // ページ読み込み時の処理
+        window.onload = function() {
+            scrollToBottom();
+            // 履歴がない場合はウェルカムメッセージを表示
+            if (document.querySelectorAll('.message-row').length === 0) {
+                document.querySelector('.chat-main').classList.add('welcome-mode');
+            } else {
+                document.querySelector('.chat-main').classList.remove('welcome-mode');
+            }
+        };
 
+        // テキストエリアの自動リサイズ
+        messageInput.addEventListener('input', function() {
+            this.style.height = 'auto'; // 一度高さをリセット
+            this.style.height = (this.scrollHeight) + 'px'; // スクロール高さに合わせて調整
+        });
+
+        // Enterキーでの送信
         messageInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !e.shiftKey) { // Shift+Enterは改行
+                e.preventDefault(); // 改行を防ぐ
                 sendMessage();
             }
         });
@@ -86,16 +299,32 @@
             const userMessage = messageInput.value.trim();
             if (!userMessage) return;
 
+            // ウェルカムメッセージを非表示にし、チャットメッセージコンテナを表示
+            const chatMain = document.querySelector('.chat-main');
+            const chatMessagesContainer = document.getElementById('chat-messages');
+            if (chatMain.classList.contains('welcome-mode')) {
+                chatMain.innerHTML = '<div id="chat-messages" class="chat-messages-container"></div>';
+                // chatMessagesを再取得 (innerHTMLを変更したため)
+                const newChatMessages = document.getElementById('chat-messages');
+                scrollToBottom();
+            }
+            
             addMessage(userMessage, 'user');
             messageInput.value = '';
+            messageInput.style.height = 'auto'; // 入力欄の高さをリセット
 
             try {
+                // ウェブ検索がオンになっているか判定
+                const useWebSearch = webSearchToggle.checked;
+                // 現時点ではuseWebSearchをバックエンドに渡すのみで、実装はダミー
+
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message: userMessage,
-                        model: modelSelector.value
+                        model: currentModel,
+                        web_search: useWebSearch // ウェブ検索の有無をバックエンドに伝える
                     })
                 });
                 const data = await response.json();
@@ -117,8 +346,12 @@
             messageContent.innerHTML = text.replace(/\n/g, '<br>');
 
             messageRow.appendChild(messageContent);
-            chatMessages.appendChild(messageRow);
-            scrollToBottom();
+            // 履歴がない場合に動的に作成される可能性があるので再取得
+            const currentChatMessagesContainer = document.getElementById('chat-messages');
+            if (currentChatMessagesContainer) {
+                currentChatMessagesContainer.appendChild(messageRow);
+                scrollToBottom();
+            }
         }
     </script>
 </body>

@@ -1,35 +1,40 @@
-import os
-import google.generativeai as genai
-from flask import Flask, render_template, request, jsonify
-from dotenv import load_dotenv
+# (既存のコードは省略)
 
-load_dotenv()
-app = Flask(__name__)
-
-try:
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-except Exception as e:
-    print(f"APIキーの設定でエラー: {e}")
-    # アプリを続行させない
-    # exit() 
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
+# チャットAPI (ログイン必須)
 @app.route("/chat", methods=["POST"])
+@login_required
 def chat():
-    message = request.json["message"]
+    user_message = request.json["message"]
     model_name = request.json.get("model", "models/gemini-flash-latest")
+    web_search = request.json.get("web_search", False) # ★ここを追加
 
+    # ユーザーのメッセージをDBに保存
+    db.session.add(Message(content=user_message, sender='user', user_id=current_user.id))
+    
     try:
         model = genai.GenerativeModel(model_name)
-        response = model.generate_content(message)
-        return jsonify({"reply": response.text})
+        
+        # ★ウェブ検索機能のダミー実装
+        ai_reply = ""
+        if web_search:
+            ai_reply += "【ウェブ検索を実行しました（ダミー）】\n"
+            ai_reply += f"AI: 「{user_message}」についてウェブで検索し、回答を生成します。\n"
+            # ここに実際の検索API呼び出しロジックと、その結果をGeminiに渡す処理が入る
+            # 現時点では、Geminiに直接ユーザーメッセージを渡す
+            response = model.generate_content(user_message)
+            ai_reply += response.text
+        else:
+            response = model.generate_content(user_message)
+            ai_reply = response.text
+
+        # AIの返信をDBに保存
+        db.session.add(Message(content=ai_reply, sender='model', user_id=current_user.id))
+        db.session.commit()
+
+        return jsonify({"reply": ai_reply})
     except Exception as e:
-        # エラー内容をターミナルに表示
+        db.session.rollback()
         print(f"エラー: {e}")
         return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(debug=True)
+# (既存のコードは省略)
