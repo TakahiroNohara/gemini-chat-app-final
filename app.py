@@ -1,4 +1,58 @@
-# (既存のコードは省略)
+import os
+import google.generativeai as genai
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_bcrypt import Bcrypt
+from dotenv import load_dotenv
+
+# 初期設定
+load_dotenv()
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.urandom(24)
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///database.db"
+
+# データベース、認証、パスワードハッシュ化の初期化
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
+
+# Gemini APIキーの設定
+try:
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+except Exception as e:
+    print(f"APIキーの設定でエラー: {e}")
+
+# --- データベースモデル定義 ---
+
+# ユーザーモデル
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(20), unique=True, nullable=False)
+    password = db.Column(db.String(60), nullable=False)
+    messages = db.relationship('Message', backref='author', lazy=True)
+
+# 会話履歴モデル
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    sender = db.Column(db.String(10), nullable=False) # 'user' or 'model'
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+# Flask-Loginがユーザー情報をロードするための関数
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# --- ルート (URLの定義) ---
+
+# チャットページ (ログイン必須)
+@app.route("/")
+@login_required
+def index():
+    messages = Message.query.filter_by(user_id=current_user.id).all()
+    return render_template("index.html", messages=messages)
 
 # チャットAPI (ログイン必須)
 @app.route("/chat", methods=["POST"])
@@ -6,7 +60,7 @@
 def chat():
     user_message = request.json["message"]
     model_name = request.json.get("model", "models/gemini-flash-latest")
-    web_search = request.json.get("web_search", False) # ★ここを追加
+    web_search = request.json.get("web_search", False) # フロントからウェブ検索の有無を受け取る
 
     # ユーザーのメッセージをDBに保存
     db.session.add(Message(content=user_message, sender='user', user_id=current_user.id))
@@ -14,14 +68,13 @@ def chat():
     try:
         model = genai.GenerativeModel(model_name)
         
-        # ★ウェブ検索機能のダミー実装
+        # ウェブ検索機能のダミー実装
         ai_reply = ""
         if web_search:
+            # 実際のウェブ検索機能はここに実装します
+            # 今はダミーのテキストを返すだけ
             ai_reply += "【ウェブ検索を実行しました（ダミー）】\n"
-            ai_reply += f"AI: 「{user_message}」についてウェブで検索し、回答を生成します。\n"
-            # ここに実際の検索API呼び出しロジックと、その結果をGeminiに渡す処理が入る
-            # 現時点では、Geminiに直接ユーザーメッセージを渡す
-            response = model.generate_content(user_message)
+            response = model.generate_content(f"以下の質問について、ウェブ検索の結果を元に回答を生成してください: {user_message}")
             ai_reply += response.text
         else:
             response = model.generate_content(user_message)
@@ -37,4 +90,47 @@ def chat():
         print(f"エラー: {e}")
         return jsonify({"error": str(e)}), 500
 
-# (既存のコードは省略)
+# 新規登録ページ
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        
+        if User.query.filter_by(username=username).first():
+            return render_template("register.html", error="このユーザー名は既に使用されています。")
+
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+        new_user = User(username=username, password=hashed_password)
+        db.session.add(new_user)
+        db.session.commit()
+        
+        login_user(new_user)
+        return redirect(url_for("index"))
+    return render_template("register.html")
+
+# ログインページ
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        user = User.query.filter_by(username=username).first()
+        if user and bcrypt.check_password_hash(user.password, password):
+            login_user(user)
+            return redirect(url_for("index"))
+        else:
+            return render_template("login.html", error="ユーザー名またはパスワードが正しくありません。")
+    return render_template("login.html")
+
+# ログアウト
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+
+if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
