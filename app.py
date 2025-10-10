@@ -1,3 +1,4 @@
+from googleapiclient.discovery import build
 import os
 import google.generativeai as genai
 from flask import Flask, render_template, request, jsonify, redirect, url_for
@@ -23,6 +24,37 @@ try:
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 except Exception as e:
     print(f"APIキーの設定でエラー: {e}")
+
+# --- ウェブ検索を実行する関数 ---
+def perform_web_search(query):
+    """Google Custom Search APIを使ってウェブ検索を実行し、結果を整形して返す"""
+    try:
+        # .envファイルからAPIキーと検索エンジンIDを読み込む
+        api_key = os.environ["GOOGLE_API_KEY"]
+        search_engine_id = os.environ["SEARCH_ENGINE_ID"]
+        
+        # 検索サービスを構築
+        service = build("customsearch", "v1", developerKey=api_key)
+        
+        # 検索を実行（num=3で上位3件を取得）
+        res = service.cse().list(q=query, cx=search_engine_id, num=3).execute()
+        
+        # 検索結果が存在するかチェック
+        if 'items' not in res:
+            return "ウェブ検索で関連する情報が見つかりませんでした。"
+        
+        # 結果を分かりやすく整形
+        search_results_text = ""
+        for item in res['items']:
+            search_results_text += f"タイトル: {item['title']}\n"
+            search_results_text += f"スニペット: {item.get('snippet', 'N/A')}\n"
+            search_results_text += f"URL: {item['link']}\n---\n"
+        
+        return search_results_text.strip()
+
+    except Exception as e:
+        print(f"ウェブ検索でエラーが発生しました: {e}")
+        return "ウェブ検索中にエラーが発生しました。"
 
 # --- データベースモデル定義 ---
 
@@ -60,25 +92,37 @@ def index():
 def chat():
     user_message = request.json["message"]
     model_name = request.json.get("model", "models/gemini-flash-latest")
-    web_search = request.json.get("web_search", False) # フロントからウェブ検索の有無を受け取る
+    web_search = request.json.get("web_search", False)
 
     # ユーザーのメッセージをDBに保存
     db.session.add(Message(content=user_message, sender='user', user_id=current_user.id))
     
     try:
         model = genai.GenerativeModel(model_name)
-        
-        # ウェブ検索機能のダミー実装
         ai_reply = ""
+
+        # ★★★ ここからが変更点 ★★★
         if web_search:
-            # 実際のウェブ検索機能はここに実装します
-            # 今はダミーのテキストを返すだけ
-            ai_reply += "【ウェブ検索を実行しました（ダミー）】\n"
-            response = model.generate_content(f"以下の質問について、ウェブ検索の結果を元に回答を生成してください: {user_message}")
-            ai_reply += response.text
+            print(f"ウェブ検索を実行します: '{user_message}'") # ターミナルで確認用
+            
+            # ステップ3で作成した関数を呼び出してウェブ検索を実行
+            search_results = perform_web_search(user_message)
+            
+            # Geminiに渡すための新しいプロンプトを作成
+            prompt_for_gemini = f"""ウェブ検索の結果は以下の通りです。
+---
+{search_results}
+---
+上記の情報に**基づいて**、次の質問に簡潔に答えてください: {user_message}"""
+            
+            # 検索結果を含むプロンプトで回答を生成
+            response = model.generate_content(prompt_for_gemini)
+            ai_reply = response.text
         else:
+            # ウェブ検索がオフの場合は、今まで通り直接質問を投げる
             response = model.generate_content(user_message)
             ai_reply = response.text
+        # ★★★ 変更点ここまで ★★★
 
         # AIの返信をDBに保存
         db.session.add(Message(content=ai_reply, sender='model', user_id=current_user.id))
