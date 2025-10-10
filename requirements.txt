@@ -2,3 +2,6 @@ flask
 google-generativeai
 python-dotenv
 gunicorn
+Flask-SQLAlchemy
+Flask-Login
+Flask-Bcrypt

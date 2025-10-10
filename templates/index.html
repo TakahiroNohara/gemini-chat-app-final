@@ -53,6 +53,7 @@
         }
         .chat-messages-container {
             width: 100%; /* メッセージ表示領域の幅 */
+            flex-grow: 1;
             max-height: calc(100vh - 160px); /* ヘッダーとフッターを考慮した高さ */
             overflow-y: auto;
             padding-bottom: 1rem; /* 入力欄との隙間 */
@@ -209,40 +210,59 @@
     </style>
 </head>
 <body>
-    <div class="container py-4">
-        <header class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
-            <h1 class="h4 mb-0">AIチャット</h1>
-            <a href="/logout" class="btn btn-outline-secondary btn-sm">ログアウト</a>
+    <div class="container-fluid d-flex flex-column min-vh-100">
+        <header class="header">
+            <button class="btn-icon"><i class="bi bi-list"></i></button>
+            <span>AIチャット</span>
+            <div class="icons">
+                <button class="btn-icon"><i class="bi bi-plus-circle"></i></button>
+                <button class="btn-icon"><i class="bi bi-upload"></i></button>
+                <a href="/logout" class="logout-link ms-3">ログアウト</a>
+            </div>
         </header>
 
-        <main>
-            <div class="card shadow-sm">
-                <div class="card-body p-0 chat-container">
-                    <div id="chat-messages" class="chat-messages">
-                        {% for msg in messages %}
-                            <div class="message-row {{ 'user-message' if msg.sender == 'user' else 'model-message' }}">
-                                <div class="message-content">
-                                    {{ msg.content.replace('\n', '<br>') | safe }}
-                                </div>
-                            </div>
-                        {% endfor %}
-                    </div>
-                    
-                    <div class="chat-input p-3 bg-light border-top">
-                        <div class="input-group">
-                             <select id="model-selector" class="form-select" style="max-width: 120px;">
-                                <option value="models/gemini-flash-latest">Flash</option>
-                                <option value="models/gemini-pro-latest">Pro</option>
-                            </select>
-                            <input type="text" id="message-input" class="form-control" placeholder="メッセージを入力...">
-                            <button class="btn btn-primary" type="button" onclick="sendMessage()">
-                                <i class="bi bi-send-fill"></i>
-                            </button>
+        <main class="chat-main">
+            {% if messages|length == 0 %}
+            <div class="welcome-message">
+                <p>こんにちは、何をお手伝いできますか？</p>
+            </div>
+            {% else %}
+            <div id="chat-messages" class="chat-messages-container">
+                {% for msg in messages %}
+                    <div class="message-row {{ 'user-message' if msg.sender == 'user' else 'model-message' }}">
+                        <div class="message-content">
+                            {{ msg.content.replace('\n', '<br>') | safe }}
                         </div>
                     </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </main>
+
+        <footer class="chat-input-area">
+            <div class="input-controls">
+                <button class="btn-icon"><i class="bi bi-mic"></i></button>
+                <div class="dropdown">
+                    <button class="btn model-dropdown-button dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="model-selector-display">
+                        <i class="bi bi-gem"></i> <span id="selected-model-text">Flash</span>
+                    </button>
+                    <ul class="dropdown-menu" aria-labelledby="model-selector-display">
+                        <li><a class="dropdown-item" href="#" data-value="models/gemini-flash-latest">Flash (高速)</a></li>
+                        <li><a class="dropdown-item" href="#" data-value="models/gemini-pro-latest">Pro (高精度)</a></li>
+                    </ul>
+                </div>
+                <div class="form-check form-switch ms-auto">
+                    <input class="form-check-input" type="checkbox" id="web-search-toggle">
+                    <label class="form-check-label" for="web-search-toggle">ウェブ検索</label>
                 </div>
             </div>
-        </main>
+            <div class="message-input-group">
+                <textarea id="message-input" class="form-control message-input" placeholder="Message" rows="1"></textarea>
+                <button class="send-button" type="button" onclick="sendMessage()">
+                    <i class="bi bi-send-fill"></i>
+                </button>
+            </div>
+        </footer>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -274,10 +294,13 @@
         window.onload = function() {
             scrollToBottom();
             // 履歴がない場合はウェルカムメッセージを表示
-            if (document.querySelectorAll('.message-row').length === 0) {
-                document.querySelector('.chat-main').classList.add('welcome-mode');
+            if (!document.getElementById('chat-messages')) {
+                 const chatMain = document.querySelector('.chat-main');
+                 if(chatMain.querySelector('.welcome-message')){
+                    chatMain.classList.add('welcome-mode');
+                 }
             } else {
-                document.querySelector('.chat-main').classList.remove('welcome-mode');
+                 document.querySelector('.chat-main').classList.remove('welcome-mode');
             }
         };
 
@@ -299,14 +322,15 @@
             const userMessage = messageInput.value.trim();
             if (!userMessage) return;
 
-            // ウェルカムメッセージを非表示にし、チャットメッセージコンテナを表示
-            const chatMain = document.querySelector('.chat-main');
-            const chatMessagesContainer = document.getElementById('chat-messages');
-            if (chatMain.classList.contains('welcome-mode')) {
-                chatMain.innerHTML = '<div id="chat-messages" class="chat-messages-container"></div>';
-                // chatMessagesを再取得 (innerHTMLを変更したため)
-                const newChatMessages = document.getElementById('chat-messages');
-                scrollToBottom();
+            // ウェルカムメッセージを非表示にし、チャットメッセージコンテナを表示する処理
+            const welcomeMessage = document.querySelector('.welcome-message');
+            if (welcomeMessage) {
+                const chatMain = document.querySelector('.chat-main');
+                welcomeMessage.remove(); // ウェルカムメッセージを削除
+                const chatMessagesContainer = document.createElement('div');
+                chatMessagesContainer.id = 'chat-messages';
+                chatMessagesContainer.className = 'chat-messages-container';
+                chatMain.appendChild(chatMessagesContainer);
             }
             
             addMessage(userMessage, 'user');
@@ -338,6 +362,13 @@
         }
 
         function addMessage(text, sender) {
+            // メッセージコンテナを毎回取得する
+            const currentChatMessagesContainer = document.getElementById('chat-messages');
+            if (!currentChatMessagesContainer) {
+                console.error('Chat messages container not found!');
+                return;
+            }
+
             const messageRow = document.createElement('div');
             messageRow.className = `message-row ${sender === 'user' ? 'user-message' : 'model-message'}`;
 
@@ -346,11 +377,12 @@
             messageContent.innerHTML = text.replace(/\n/g, '<br>');
 
             messageRow.appendChild(messageContent);
-            // 履歴がない場合に動的に作成される可能性があるので再取得
-            const currentChatMessagesContainer = document.getElementById('chat-messages');
-            if (currentChatMessagesContainer) {
-                currentChatMessagesContainer.appendChild(messageRow);
-                scrollToBottom();
+            currentChatMessagesContainer.appendChild(messageRow);
+            
+            // スクロール処理のためにコンテナを再取得して実行
+            const containerToScroll = document.getElementById('chat-messages');
+            if(containerToScroll) {
+                containerToScroll.scrollTop = containerToScroll.scrollHeight;
             }
         }
     </script>
