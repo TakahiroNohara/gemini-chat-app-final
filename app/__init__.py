@@ -1,7 +1,8 @@
+# app/__init__.py
 import os
-import logging
 import re
-from datetime import datetime
+import logging
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from flask import (
@@ -13,12 +14,13 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_login import LoginManager, login_required, current_user
 from flask_talisman import Talisman
-from redis import Redis  # 依存解決のためのimport（直接は未使用でもOK）
-import redis as redis_lib
-from rq import Queue
 from flask_migrate import Migrate
 
-# ✅ Markdown/XSS 対策
+# Redis/RQ（あれば使う）
+import redis as redis_lib
+from rq import Queue
+
+# Markdown/XSS 対策
 import markdown as md
 import bleach
 
@@ -28,8 +30,9 @@ from .models import db, User, Conversation, Message, Announcement
 
 logger = logging.getLogger("gemini_chat_app")
 
+
 # ===============================
-# タイトル整形の共通関数（埋め込み）
+# タイトル整形の共通関数
 # ===============================
 def clean_and_shorten_title(text: str, max_length: int = 18) -> str:
     if not text:
@@ -43,8 +46,9 @@ def clean_and_shorten_title(text: str, max_length: int = 18) -> str:
         title = title[:max_length - 1] + "…"
     return title.strip() or "会話"
 
+
 # ===============================
-# 安全なMarkdownレンダラ（修正版）
+# 安全なMarkdownレンダラ（linkify例外に耐性）
 # ===============================
 _ALLOWED_TAGS = set(bleach.sanitizer.ALLOWED_TAGS).union({
     "p", "br", "pre", "code", "blockquote",
@@ -58,13 +62,16 @@ _ALLOWED_ATTRS = {
 }
 _ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
 
+
 def _linkify_callback(attrs, new=False):
+    # bleach>=6 の attrs は dict keys が (ns, name) なので tuple を使う
     href_key = (None, "href")
     if href_key not in attrs:
         return attrs
     attrs[(None, "rel")] = "nofollow noopener noreferrer"
     attrs[(None, "target")] = "_blank"
     return attrs
+
 
 def render_markdown_safe(text: str) -> str:
     if not text:
@@ -115,43 +122,49 @@ def create_app() -> Flask:
     app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
     app.config["PERMANENT_SESSION_LIFETIME"] = int(os.getenv("PERMANENT_SESSION_LIFETIME", 604800))
 
-    # --- Flask-Talisman（セキュリティヘッダ） ---
-    csp = {
-        "default-src": ["'self'"],
-        "img-src": ["'self'", "data:"],
-        "style-src": ["'self'", "'unsafe-inline'"],
-        "script-src": ["'self'"],
-        "connect-src": ["'self'"],
-    }
+    # --- CSRF 設定（Referrer 厳格チェックを緩和：Renderでの登録フォーム対策） ---
+    app.config.setdefault("WTF_CSRF_SSL_STRICT", False)
+
+    # --- Flask-Talisman（セキュリティヘッダ / Referer 対策 / 本番HTTPS） ---
+    # Render での “Referrer missing” 回避のために referrer_policy を適切に。
     Talisman(
         app,
-        content_security_policy=csp,
-        force_https=False,  # リバースプロキシでTLS終端なら True に
-        strict_transport_security=True,
+        content_security_policy=None,  # まずはCSPを緩めて機能優先（必要に応じて強化）
+        referrer_policy="strict-origin-when-cross-origin",
+        force_https=True,              # 実運用はHTTPS前提
         frame_options="SAMEORIGIN",
-        referrer_policy="no-referrer",
+        strict_transport_security=True,
     )
 
     # --- 拡張 ---
     CSRFProtect(app)
 
-    # Limiter を Redis バックエンドに（本番化）
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    # Limiter: Redis があれば使う、無ければ memory:// にフォールバック（Renderでの接続拒否対策）
+    redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
+    storage_uri = redis_url if redis_url else "memory://"
     limiter = Limiter(
         key_func=get_remote_address,
         default_limits=["100/minute"],
-        storage_uri=redis_url,
+        storage_uri=storage_uri,
     )
     limiter.init_app(app)
 
-    # ✅ RQ（Redis Queue）初期化
-    rq_conn = redis_lib.from_url(redis_url)
-    rq_queue = Queue("default", connection=rq_conn, default_timeout=180)
+    # RQ（Redis Queue）：REDIS_URL があるときだけ初期化
+    rq_queue = None
+    if redis_url:
+        try:
+            rq_conn = redis_lib.from_url(redis_url)
+            rq_conn.ping()
+            rq_queue = Queue("default", connection=rq_conn, default_timeout=180)
+            logger.info("RQ queue connected.")
+        except Exception as e:
+            logger.warning(f"RQ init failed (continue without async): {e}")
+            rq_queue = None
     app.extensions["rq_queue"] = rq_queue
 
     db.init_app(app)
 
-    # ✅ Flask-Migrate 初期化
+    # Flask-Migrate
     Migrate(app, db)
 
     # --- ログイン ---
@@ -356,7 +369,7 @@ def create_app() -> Flask:
         db.session.commit()
         return jsonify({"ok": True})
 
-    # ----------------- History (summary付きで返す + HTML付与) -----------------
+    # ----------------- History (summary付き + 安全HTML） -----------------
     @bp.route("/api/history/<int:conversation_id>", methods=["GET"])
     @login_required
     def api_history(conversation_id: int):
@@ -367,7 +380,7 @@ def create_app() -> Flask:
         data = [{
             "role": m.sender,
             "content": m.content,
-            "html": render_markdown_safe(m.content),  # ← 安全HTML
+            "html": render_markdown_safe(m.content),
             "created_at": m.created_at.isoformat()
         } for m in msgs]
         return jsonify({
@@ -376,12 +389,10 @@ def create_app() -> Flask:
             "summary": conv.summary or ""
         })
 
-    # ----------------- Chat（天気/ニュースは内部で検索に切替） -----------------
+    # ----------------- Chat（天気/ニュースは検索経由で“今日”に強制寄せ） -----------------
     @bp.route("/api/chat", methods=["POST"])
     @login_required
     def api_chat():
-        from datetime import timezone, timedelta
-
         data = _json()
         msg = (data.get("message") or "").strip()
         if not msg:
@@ -412,13 +423,12 @@ def create_app() -> Flask:
 
         if is_weather or is_news:
             try:
-                # JSTの今日
-                from datetime import timezone, timedelta
                 JST = timezone(timedelta(hours=9))
                 today_jst = datetime.now(JST).date()
                 yyyy = today_jst.year; mm = today_jst.month; dd = today_jst.day
                 jp_full = f"{yyyy}年{mm}月{dd}日"
                 iso1 = f"{yyyy}-{mm:02d}-{dd:02d}"
+                en1  = datetime.now(JST).strftime("%b %d, %Y")
 
                 # 言語/ジオ
                 is_japanese = bool(re.search(r"[ぁ-んァ-ン一-龥]", msg))
@@ -438,13 +448,12 @@ def create_app() -> Flask:
                 sc: SearchClient = current_app.extensions["search_client"]
                 gc: GeminiClient = current_app.extensions["gemini_client"]
 
-                # 1回目：今日の日付をクエリに付与 + 24h以内
+                # 今日の日付を付与して 24h に寄せる
                 query1 = add_site_bias(f"{msg} {jp_full}")
                 results = sc.search(query1, top_k=5, recency_days=1, gl=gl, lr=lr)
 
-                # 今日表記フィルタ
-                date_patterns = [jp_full, f"{mm}月{dd}日", iso1, f"{yyyy}/{mm:02d}/{dd:02d}",
-                                 datetime.now(JST).strftime("%b %d, %Y")]
+                date_patterns = [jp_full, f"{mm}月{dd}日", iso1, f"{yyyy}/{mm:02d}/{dd:02d}", en1]
+
                 def filter_today(rs):
                     outs = []
                     for r in rs:
@@ -452,22 +461,21 @@ def create_app() -> Flask:
                         if any(p in hay for p in date_patterns):
                             outs.append(r)
                     return outs
+
                 today_hits = filter_today(results)
 
                 if not today_hits:
-                    # 2回目：緩めてd2
+                    # 緩めて48h
                     query2 = add_site_bias(msg)
                     results = sc.search(query2, top_k=5, recency_days=2, gl=gl, lr=lr)
                     today_hits = filter_today(results)
 
                 final_results = today_hits or results
 
-                # ガード付きで要約（“今日以外は無視”）
-                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用し、過去日付は無視してください。出典の更新日を必ず確認し、曖昧なら『最新の公式情報を確認してください』と注記。"
+                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用し、過去日付は無視してください。出典の更新日時を確認し、曖昧なら『最新の公式情報を確認してください』と注記。"
                 composed_query = guard + "\n\nユーザー入力: " + msg
                 summary = gc.summarize_with_citations(composed_query, final_results, (request.args.get("model") or "").strip())
 
-                # 返す本文
                 reply = summary.get("answer") or summary.get("summary") or summary.get("text") or summary.get("content")
                 if not reply:
                     bullets = "\n".join([f"- [{r['title']}]({r['url']})" for r in final_results])
@@ -479,10 +487,13 @@ def create_app() -> Flask:
                 db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
                 db.session.commit()
 
-                # 要約＋タイトル生成は非同期
+                # 要約＋タイトル生成は RQ があれば非同期
                 try:
-                    q = current_app.extensions["rq_queue"]
-                    q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+                    q = current_app.extensions.get("rq_queue")
+                    if q is not None:
+                        q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+                    else:
+                        logger.info("RQ not available; skip async summarization.")
                 except Exception as e:
                     logger.warning(f"enqueue summary job failed: {e}")
 
@@ -512,10 +523,13 @@ def create_app() -> Flask:
         db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
         db.session.commit()
 
-        # 要約＋タイトル生成は非同期ジョブ
+        # 要約＋タイトル生成は RQ があれば非同期
         try:
-            q = current_app.extensions["rq_queue"]
-            q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+            q = current_app.extensions.get("rq_queue")
+            if q is not None:
+                q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+            else:
+                logger.info("RQ not available; skip async summarization.")
         except Exception as e:
             logger.warning(f"enqueue summary job failed: {e}")
 
@@ -531,9 +545,6 @@ def create_app() -> Flask:
     @bp.route("/api/search_summarize", methods=["POST"])
     @login_required
     def api_search_summarize():
-        from datetime import timezone, timedelta
-        import re
-
         data = _json()
         query = (data.get("query") or "").strip()
         if not query:
@@ -652,3 +663,4 @@ def create_app() -> Flask:
 
     app.register_blueprint(bp)
     return app
+
