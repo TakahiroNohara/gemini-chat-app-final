@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>管理者ダッシュボード</title>
+  <style>
+    body { font-family: "Noto Sans JP", system-ui, sans-serif; background:#f5f6f8; margin:0; }
+    header { background:#1976d2; color:#fff; padding:16px 24px; display:flex; justify-content:space-between; align-items:center; }
+    header h1 { margin:0; font-size:22px; }
+    header a { color:#fff; text-decoration:none; font-weight:bold; margin-left:16px; }
+    main { max-width:1100px; margin:24px auto; background:#fff; padding:20px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.08); }
+    h2 { border-left:5px solid #1976d2; padding-left:10px; margin-top:24px; font-size:18px; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th, td { border:1px solid #ddd; padding:8px; text-align:left; }
+    th { background:#f0f0f0; }
+    form { display:inline; }
+    button { background:#d32f2f; border:none; color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer; }
+    button:hover { background:#b71c1c; }
+    .top-links { margin-bottom:12px; display:flex; justify-content:flex-end; gap:10px; }
+    .link-btn { background:#1976d2; color:#fff; text-decoration:none; padding:6px 10px; border-radius:6px; }
+    .link-btn:hover { background:#0d47a1; }
+    .announce-form { margin-top:15px; background:#f8f9fa; padding:10px; border-radius:8px; }
+    textarea { width:100%; height:80px; resize:vertical; padding:8px; }
+    .announce-item { background:#e3f2fd; padding:10px; border-radius:6px; margin-top:8px; display:flex; justify-content:space-between; align-items:center; }
+    .announce-item p { margin:0; }
+    .active { color:green; font-weight:bold; }
+    .inactive { color:gray; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛡️ 管理者ダッシュボード</h1>
+    <nav>
+      <a href="{{ url_for('core.chat') }}">💬 チャットへ戻る</a>
+      <a href="{{ url_for('auth.logout') }}">ログアウト</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="top-links">
+      <a class="link-btn" href="{{ url_for('core.chat') }}">🔙 一般画面に戻る</a>
+    </div>
+
+    <!-- 🔔 アナウンス管理 -->
+    <h2>🔔 お知らせ管理</h2>
+    <form class="announce-form" method="post" action="{{ url_for('core.add_announcement') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <textarea name="message" placeholder="新しいお知らせを入力..." required></textarea>
+      <div style="margin-top:8px;">
+        <label><input type="checkbox" name="is_active" value="1" checked> 公開する</label>
+        <button type="submit" style="background:#388e3c;">追加</button>
+      </div>
+    </form>
+
+    {% if announcements %}
+      {% for a in announcements %}
+      <div class="announce-item">
+        <p>
+          🕓 {{ a.timestamp.strftime('%Y-%m-%d %H:%M') if a.timestamp else '' }}<br>
+          {{ a.message }}
+          {% if a.is_active %}
+            <span class="active">[公開中]</span>
+          {% else %}
+            <span class="inactive">[非公開]</span>
+          {% endif %}
+        </p>
+        <div>
+          <form method="post" action="{{ url_for('core.toggle_announcement', ann_id=a.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" style="background:#0288d1;">
+              {% if a.is_active %}非公開にする{% else %}公開にする{% endif %}
+            </button>
+          </form>
+          <form method="post" action="{{ url_for('core.delete_announcement', ann_id=a.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit">削除</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p>現在お知らせはありません。</p>
+    {% endif %}
+
+    <!-- 👥 ユーザー一覧 -->
+    <h2>👥 ユーザー一覧</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>ユーザー名</th>
+          <th>管理者</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u.id }}</td>
+          <td>{{ u.username }}</td>
+          <td>{{ "✅" if u.is_admin else "—" }}</td>
+          <td>
+            {% if not u.is_admin %}
+            <form method="post" action="{{ url_for('core.delete_user', user_id=u.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" onclick="return confirm('ユーザーと関連データを削除します。よろしいですか？')">削除</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <!-- 💬 会話一覧 -->
+    <h2>💬 最近の会話履歴</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>タイトル</th>
+          <th>ユーザーID</th>
+          <th>ピン留め</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in conversations %}
+        <tr>
+          <td>{{ c.id }}</td>
+          <td>{{ c.title }}</td>
+          <td>{{ c.user_id }}</td>
+          <td>{{ "📌" if c.is_pinned else "" }}</td>
+          <td>
+            <form method="post" action="{{ url_for('core.delete_conversation', cid=c.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" onclick="return confirm('この会話を削除しますか？')">削除</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>
+
+
+
+

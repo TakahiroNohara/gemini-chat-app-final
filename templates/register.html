@@ -1,28 +1,38 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <title>新規登録</title>
-    <style>
-        body { font-family: sans-serif; max-width: 400px; margin: 50px auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
-        h1 { text-align: center; }
-        form { display: flex; flex-direction: column; gap: 15px; }
-        input { padding: 10px; border-radius: 5px; border: 1px solid #ccc; }
-        button { padding: 10px; border: none; background-color: #0d6efd; color: white; border-radius: 5px; cursor: pointer; }
-        .error { color: red; }
-        p { text-align: center; }
-    </style>
+  <meta charset="UTF-8">
+  <title>新規登録</title>
+  <style>
+    body { font-family:sans-serif; max-width:400px; margin:50px auto; padding:20px; border:1px solid #ccc; border-radius:8px; }
+    h1 { text-align:center; }
+    form { display:flex; flex-direction:column; gap:15px; }
+    input { padding:10px; border-radius:5px; border:1px solid #ccc; }
+    button { padding:10px; border:none; background:#198754; color:#fff; border-radius:5px; cursor:pointer; }
+    .error { color:red; }
+    p { text-align:center; margin-top:10px; }
+  </style>
 </head>
 <body>
-    <h1>新規登録</h1>
-    {% if error %}
-        <p class="error">{{ error }}</p>
+  <h1>新規登録</h1>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
     {% endif %}
-    <form method="post">
-        <input type="text" name="username" placeholder="ユーザー名" required>
-        <input type="password" name="password" placeholder="パスワード" required>
-        <button type="submit">登録</button>
-    </form>
-    <p>アカウントをお持ちですか？ <a href="{{ url_for('login') }}">ログイン</a></p>
+  {% endwith %}
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  <form method="post" action="">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="username" placeholder="ユーザー名" required>
+    <input type="password" name="password" placeholder="パスワード" required>
+    <button type="submit">登録</button>
+  </form>
+
+  <p>アカウントをお持ちですか？ <a href="{{ url_for('auth.login') }}">ログイン</a></p>
 </body>
 </html>
+
+

@@ -1,0 +1,8 @@
+body { font-family: system-ui, sans-serif; margin: 20px; background: #f6f7f9; }
+.container { max-width: 720px; margin: auto; background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+.msg { padding: 10px; margin: 6px 0; border-radius: 8px; line-height: 1.5; }
+.msg.user { background: #e8f5e9; text-align: right; }
+.msg.assistant { background: #f1f3f4; }
+.composer { display:flex; gap:8px; margin-top: 8px; }
+.composer input { flex:1; padding:8px 10px; border:1px solid #ddd; border-radius:8px; }
+.composer button { padding:8px 12px; border:0; border-radius:8px; background:#1976d2; color:#fff; cursor:pointer; }

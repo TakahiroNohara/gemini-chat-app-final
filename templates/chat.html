@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gemini Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="csrf-token" content="{{ csrf_token() }}" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { height:100%; }
+    body { margin:0; font-family: system-ui, "Noto Sans JP", sans-serif; background:#121314; color:#e7e9ed; }
+
+    /* ===== Layout ===== */
+    .wrap {
+      display:grid;
+      grid-template-columns: 280px 1fr;
+      height:100vh;
+      overflow:hidden;
+      transition: grid-template-columns .25s ease;
+    }
+    .wrap.collapsed { grid-template-columns: 0 1fr; }
+    aside {
+      background:#1a1c1f;
+      border-right:1px solid #2a2d31;
+      padding:10px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      min-width:0;
+      overflow:hidden;
+    }
+    .wrap.collapsed aside { padding:0; border-right:0; }
+
+    main { display:flex; flex-direction:column; height:100vh; position:relative; min-width:0; }
+
+    /* ===== Sidebar ===== */
+    .toolbar { display:flex; align-items:center; gap:8px; }
+    .icon-btn {
+      width:34px; height:34px; display:grid; place-items:center;
+      background:transparent; border:1px solid #35383d; color:#e7e9ed; border-radius:8px; cursor:pointer; font-size:14px;
+    }
+    .icon-btn:hover { background:#23262a; }
+    .new-btn { background:#2f7dff; border:none; color:#fff; padding:8px 10px; border-radius:8px; cursor:pointer; font-weight:600; font-size:13px; }
+    .new-btn:hover { filter:brightness(1.07); }
+
+    .search-box { display:flex; gap:6px; }
+    .search-box input {
+      width:100%; padding:7px 9px; border-radius:8px; border:1px solid #35383d; background:#0f1012; color:#e7e9ed;
+      font-size:12px;
+    }
+    .ghost-btn {
+      background:transparent; border:1px solid #35383d; color:#e7e9ed; padding:6px 8px; border-radius:8px; cursor:pointer; font-size:12px;
+    }
+    .ghost-btn:hover { background:#23262a; }
+
+    .list { overflow-y:auto; border-top:1px solid #26292d; padding-top:6px; min-height:0; }
+    .item { display:flex; align-items:center; gap:6px; padding:7px; border-radius:8px; cursor:pointer; }
+    .item:hover { background:#23262a; }
+    .item.active { background:#2b2f34; }
+    .title { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px; line-height:1.3; max-width: 200px; }
+    .pin { opacity:.8; font-size:12px; }
+    .muted { color:#9aa0a6; font-size:12px; }
+
+    /* ===== Header ===== */
+    header { display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid #2a2d31; padding:8px 14px; background:#15171a; position:relative; z-index:2; }
+    .brand { display:flex; align-items:center; gap:8px; }
+    .brand h1 { font-size:15px; margin:0; }
+    .controls { display:flex; gap:10px; align-items:center; }
+    select { background:#0f1012; color:#e7e9ed; border:1px solid #35383d; padding:6px 10px; border-radius:8px; font-size:13px; }
+
+    /* ===== Announcement ===== */
+    .announce { margin:10px auto 0; max-width:900px; padding:8px 10px; background:#2a2613; border:1px solid #564516; color:#ffecb5; border-radius:10px; font-size:13px; }
+
+    /* ===== Chat area ===== */
+    .content { flex:1; overflow:auto; position:relative; z-index:0; }
+    .container { max-width:900px; margin:0 auto; padding:14px; }
+
+    .messages {
+      background:#0f1012; border:1px solid #2a2d31; border-radius:12px; padding:12px;
+      min-height:360px; display:flex; flex-direction:column; gap:10px;
+    }
+    .msg {
+      max-width: 76%;
+      position: relative;
+      padding: 10px 12px;
+      border-radius: 16px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size:14px;
+    }
+    .msg.user { align-self:flex-end; background:linear-gradient(180deg,#1e824c,#166b3e); color:#eafdf2; border-bottom-right-radius:6px; }
+    .msg.user:after { content:""; position:absolute; right:-6px; bottom:0; border-width:6px 0 0 6px; border-style:solid; border-color:transparent transparent transparent #166b3e; }
+    .msg.assistant { align-self:flex-start; background:#101923; border:1px solid #263241; color:#e7eef7; border-bottom-left-radius:6px; }
+    .msg.assistant:after { content:""; position:absolute; left:-6px; bottom:0; border-width:6px 6px 0 0; border-style:solid; border-color:transparent #101923 transparent transparent; }
+
+    .refs { margin-top:6px; padding-top:6px; border-top:1px dashed #2a3950; font-size:12px; color:#9aa0a6; }
+    .refs a { color:#9fc3ff; text-decoration:none; }
+
+    /* ===== Composer ===== */
+    .composer { display:grid; grid-template-columns: 1fr auto; gap:10px; margin-top:12px; position:relative; z-index:3; }
+    .composer textarea {
+      background:#0f1012; color:#e7e9ed; border:1px solid #35383d; border-radius:10px; padding:12px;
+      min-height:56px; resize:vertical; line-height:1.5; font-size:14px;
+    }
+    .send-col { display:flex; flex-direction:column; align-items:stretch; gap:6px; }
+    .composer button {
+      background:#2f7dff; border:none; color:#fff; padding:12px 16px; border-radius:10px; cursor:pointer; pointer-events:auto; font-weight:600;
+    }
+    .composer button:hover { filter:brightness(1.07); }
+    .inline-switch {
+      display:flex; align-items:center; gap:6px; justify-content:flex-end;
+      font-size:12px; color:#9aa0a6;
+    }
+    .inline-switch input { width:16px; height:16px; }
+
+    .hint { margin-top:6px; font-size:12px; color:#9aa0a6; }
+
+    /* ===== Footer ===== */
+    .footer { display:flex; align-items:center; justify-content:space-between; padding:8px 14px; border-top:1px solid #2a2d31; background:#15171a; position:relative; z-index:1; font-size:12px; }
+    a.link { color:#9fc3ff; text-decoration:none; }
+  </style>
+</head>
+<body>
+
+<div class="wrap" id="layout">
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="toolbar">
+      <button id="sidebar-toggle" class="icon-btn" type="button" aria-label="メニューを開閉">☰</button>
+      <button class="new-btn" id="btn-new" type="button" title="新しい会話を作成">＋ 新規</button>
+    </div>
+
+    <div class="search-box" style="margin-top:4px;">
+      <input id="conv-search" type="text" placeholder="会話を検索…" />
+      <button class="ghost-btn" id="btn-refresh" type="button">更新</button>
+    </div>
+
+    <div class="list" id="conv-list"><div class="muted">会話はまだありません。</div></div>
+  </aside>
+
+  <!-- Main -->
+  <main>
+    <header>
+      <div class="brand">
+        <button id="sidebar-toggle-top" class="icon-btn" type="button" aria-label="メニューを開閉">☰</button>
+        <img src="https://fonts.gstatic.com/s/i/productlogos/gemini/v7/192px.svg" alt="" width="18" height="18"/>
+        <h1>Gemini Chat</h1>
+      </div>
+      <div class="controls">
+        <label style="display:flex; align-items:center; gap:6px;">
+          <span class="muted">モデル</span>
+          <select id="model">
+            <option value="">auto</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            <option value="gemini-2.0-pro">gemini-2.0-pro</option>
+          </select>
+        </label>
+        {% if is_admin %}
+          <a class="ghost-btn" href="{{ url_for('core.admin_dashboard') }}">🛡️ 管理</a>
+        {% endif %}
+        <a class="ghost-btn" href="{{ url_for('auth.logout') }}">ログアウト</a>
+      </div>
+    </header>
+
+    {% if announcement %}
+      <div class="announce"><strong>🔔 お知らせ:</strong> {{ announcement.message }}</div>
+    {% endif %}
+
+    <div class="content" id="content">
+      <div class="container">
+        <!-- 要約（AI）表示領域 -->
+        <div id="summary" class="muted" style="margin:6px 0 10px;"></div>
+
+        <!-- メッセージ -->
+        <div class="messages" id="messages" aria-live="polite"></div>
+
+        <!-- 入力欄（送信ボタンの下にWeb検索トグルを配置） -->
+        <div class="composer">
+          <textarea id="input" placeholder="メッセージを入力…（Enterで改行 / Shift+Enterで送信）" autocomplete="off" rows="3"></textarea>
+          <div class="send-col">
+            <button id="send" type="button" aria-label="送信">送信</button>
+            <label class="inline-switch" title="送信メッセージをクエリにWeb検索して要約も併記">
+              <input type="checkbox" id="websearch-enabled" />
+              Web検索を使う
+            </label>
+          </div>
+        </div>
+        <div class="hint">Enterで改行・Shift+Enterで送信</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="muted">御堂筋共有ワークスペース - Gemini Chat</div>
+      <a class="link" href="#" id="btn-export">💾 エクスポート</a>
+    </div>
+  </main>
+</div>
+
+<script>
+  // サイドバー開閉（状態は localStorage に保存）
+  (function () {
+    const layout = document.getElementById('layout');
+    const t1 = document.getElementById('sidebar-toggle');
+    const t2 = document.getElementById('sidebar-toggle-top');
+    const KEY = 'SIDEBAR_COLLAPSED';
+
+    function applyFromStore() {
+      const collapsed = localStorage.getItem(KEY) === '1';
+      layout.classList.toggle('collapsed', collapsed);
+    }
+    function toggle() {
+      const collapsed = !layout.classList.contains('collapsed');
+      layout.classList.toggle('collapsed', collapsed);
+      localStorage.setItem(KEY, collapsed ? '1' : '0');
+    }
+    document.addEventListener('DOMContentLoaded', applyFromStore);
+    t1?.addEventListener('click', toggle);
+    t2?.addEventListener('click', toggle);
+  })();
+</script>
+
+<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+</body>
+</html>
+

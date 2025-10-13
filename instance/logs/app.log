@@ -1,0 +1,13 @@
+2025-10-12 05:10:14,688 | INFO | req_id=c346857fa17d | user=2:野原 | ip=60.130.88.65 | Logout
+2025-10-12 05:36:02,147 | WARNING | req_id=- | user=- | ip=- | CSRF failed: The referrer does not match the host.
+2025-10-12 05:44:18,512 | INFO | req_id=9638fd209bdd | user=- | ip=60.130.88.65 | Admin login success: t.nohara@mdsj.jp
+2025-10-12 05:45:30,400 | INFO | req_id=403fac7f46af | user=1:t.nohara@mdsj.jp | ip=60.130.88.65 | Logout
+2025-10-12 05:45:35,992 | INFO | req_id=e402857c79a7 | user=- | ip=60.130.88.65 | Login success: 野原
+2025-10-12 05:45:54,993 | INFO | req_id=5c9bb7eeaeec | user=2:野原 | ip=60.130.88.65 | Logout
+2025-10-12 05:46:05,393 | INFO | req_id=77356d6f14f1 | user=- | ip=60.130.88.65 | Admin login success: t.nohara@mdsj.jp
+2025-10-12 05:46:06,953 | WARNING | req_id=8d32ea46a2b0 | user=1:t.nohara@mdsj.jp | ip=60.130.88.65 | User deleted: 野原 (2) by admin
+2025-10-12 05:46:11,182 | INFO | req_id=ff2d2b0022a8 | user=1:t.nohara@mdsj.jp | ip=60.130.88.65 | Logout
+2025-10-12 05:46:17,184 | WARNING | req_id=3850666bd27e | user=- | ip=60.130.88.65 | Login failed: 野原
+2025-10-12 05:51:49,351 | INFO | req_id=2033a8d85b9c | user=- | ip=60.130.88.65 | Login success: t.nohara@mdsj.jp
+2025-10-12 05:51:55,206 | INFO | req_id=4aa04a5a2225 | user=1:t.nohara@mdsj.jp | ip=60.130.88.65 | Logout
+2025-10-12 05:57:32,901 | INFO | req_id=c65267979358 | user=- | ip=60.130.88.65 | User registered: 野原
