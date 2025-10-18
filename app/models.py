@@ -23,6 +23,7 @@ class Conversation(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     is_pinned = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     summary = db.Column(db.Text, nullable=True)  # ✅ AIによる会話要約を保存
 
     user = db.relationship("User", backref=db.backref("conversations", lazy=True))

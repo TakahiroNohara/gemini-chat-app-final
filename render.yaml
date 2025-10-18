@@ -1,0 +1,83 @@
+services:
+  # Web Service
+  - type: web
+    name: gemini-chat-app
+    runtime: python
+    plan: free  # または starter, standard など
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn -c gunicorn.conf.py wsgi:app"
+    envVars:
+      # Python version
+      - key: PYTHON_VERSION
+        value: 3.12
+
+      # Flask settings
+      - key: SECRET_KEY
+        generateValue: true  # Renderが自動生成
+
+      - key: FORCE_HTTPS
+        value: true
+
+      - key: SESSION_COOKIE_SECURE
+        value: true
+
+      - key: SESSION_COOKIE_HTTPONLY
+        value: true
+
+      - key: SESSION_COOKIE_SAMESITE
+        value: Lax
+
+      # Gemini API (これらは手動で設定してください)
+      - key: GEMINI_API_KEY
+        sync: false  # 手動設定が必要
+
+      - key: GOOGLE_API_VERSION
+        value: v1beta
+
+      - key: DEFAULT_GEMINI_MODEL
+        value: gemini-2.5-flash
+
+      - key: FALLBACK_GEMINI_MODEL
+        value: gemini-2.5-pro
+
+      - key: USE_MOCK_GEMINI
+        value: false
+
+      # Search API (これらは手動で設定してください)
+      - key: SEARCH_PROVIDER
+        value: google_cse
+
+      - key: GOOGLE_API_KEY
+        sync: false  # 手動設定が必要
+
+      - key: GOOGLE_CSE_ID
+        sync: false  # 手動設定が必要
+
+      # Gunicorn
+      - key: WEB_CONCURRENCY
+        value: 2
+
+      # Database (PostgreSQL接続は自動設定)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gemini-chat-db
+          property: connectionString
+
+      # Redis (Redis接続は自動設定)
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: gemini-chat-redis
+          property: connectionString
+
+  # PostgreSQL Database
+  - type: pserv
+    name: gemini-chat-db
+    plan: free  # または starter
+    ipAllowList: []  # 空 = すべてのIPを許可
+
+  # Redis
+  - type: redis
+    name: gemini-chat-redis
+    plan: free  # または starter
+    ipAllowList: []  # 空 = すべてのIPを許可

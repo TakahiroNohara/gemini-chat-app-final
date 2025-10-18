@@ -1,9 +1,16 @@
+from dotenv import load_dotenv
+load_dotenv()
 # app/__init__.py
 import os
 import re
 import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+import markdown as md
+import bleach
+import redis as redis_lib
+from rq import Queue
 
 from flask import (
     Flask, Blueprint, render_template, request, jsonify, abort,
@@ -15,56 +22,38 @@ from flask_limiter.util import get_remote_address
 from flask_login import LoginManager, login_required, current_user
 from flask_talisman import Talisman
 from flask_migrate import Migrate
+from flask_bcrypt import Bcrypt
 
-# Redis/RQ（あれば使う）
-import redis as redis_lib
-from rq import Queue
-
-# Markdown/XSS 対策
-import markdown as md
-import bleach
-
-from services.gemini_client import GeminiClient, GeminiFallbackError
-from services.search import SearchClient, SearchError
 from .models import db, User, Conversation, Message, Announcement
 
 logger = logging.getLogger("gemini_chat_app")
 
+# モックモードの判定
+USE_MOCK = os.getenv("USE_MOCK_GEMINI", "false").lower() == "true"
+if USE_MOCK:
+    from services.gemini_client_mock import GeminiClient, GeminiFallbackError
+    logger.warning("🔧 Using MOCK Gemini client (development mode)")
+else:
+    # HTTP版を使用（Python SDKのタイムアウト問題を回避）
+    from services.gemini_client_http import GeminiClient, GeminiFallbackError
+    logger.info("Using HTTP-based Gemini client")
+
+from services.search import SearchClient, SearchError
 
 # ===============================
-# タイトル整形の共通関数
-# ===============================
-def clean_and_shorten_title(text: str, max_length: int = 18) -> str:
-    if not text:
-        return "会話"
-    title = re.sub(r"[\r\n\t]+", " ", str(text)).strip()
-    forbidden = ['「', '」', '"', "'", '。', '、', '：', ':', '|', '/', '\\', '　']
-    for ch in forbidden:
-        title = title.replace(ch, "")
-    title = re.sub(r"\s+", " ", title)
-    if len(title) > max_length:
-        title = title[:max_length - 1] + "…"
-    return title.strip() or "会話"
-
-
-# ===============================
-# 安全なMarkdownレンダラ（linkify例外に耐性）
+# Markdown/XSS Safe Renderer
 # ===============================
 _ALLOWED_TAGS = set(bleach.sanitizer.ALLOWED_TAGS).union({
     "p", "br", "pre", "code", "blockquote",
-    "ul", "ol", "li",
-    "strong", "em",
+    "ul", "ol", "li", "strong", "em",
     "h1", "h2", "h3", "h4",
     "table", "thead", "tbody", "tr", "th", "td"
 })
-_ALLOWED_ATTRS = {
-    "a": ["href", "title", "rel", "target"],
-}
+_ALLOWED_ATTRS = {"a": ["href", "title", "rel", "target"]}
 _ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
 
 
 def _linkify_callback(attrs, new=False):
-    # bleach>=6 の attrs は dict keys が (ns, name) なので tuple を使う
     href_key = (None, "href")
     if href_key not in attrs:
         return attrs
@@ -82,23 +71,54 @@ def render_markdown_safe(text: str) -> str:
     )
     try:
         html = bleach.linkify(
-            html,
-            callbacks=[_linkify_callback],
-            skip_tags=["code", "pre"],
-            parse_email=True
+            html, callbacks=[_linkify_callback], skip_tags=["code", "pre"], parse_email=True
         )
     except Exception as e:
         logger.warning(f"bleach.linkify failed, fallback without linkify: {e}")
     clean = bleach.clean(
-        html,
-        tags=_ALLOWED_TAGS,
-        attributes=_ALLOWED_ATTRS,
-        protocols=_ALLOWED_PROTOCOLS,
-        strip=True
+        html, tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS,
+        protocols=_ALLOWED_PROTOCOLS, strip=True
     )
     return clean
 
 
+def clean_and_shorten_title(text: str, max_length: int = 18) -> str:
+    if not text:
+        return "会話"
+    title = re.sub(r"[\r\n\t]+", " ", str(text)).strip()
+    for ch in ['「', '」', '"', "'", '。', '、', '：', ':', '|', '/', '\\', '　']:
+        title = title.replace(ch, "")
+    title = re.sub(r"\s+", " ", title)
+    if len(title) > max_length:
+        title = title[:max_length - 1] + "…"
+    return title.strip() or "会話"
+
+
+# ===============================
+# Helpers: Redis availability
+# ===============================
+def choose_redis_url_or_memory() -> tuple[str, bool]:
+    """
+    REDIS_URL が使えればそれを返す。接続不可なら ('memory://', False) を返す。
+    """
+    redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
+    if not redis_url:
+        logger.info("REDIS_URL not set -> using memory storage for limiter and disabling RQ.")
+        return "memory://", False
+
+    try:
+        conn = redis_lib.from_url(redis_url, socket_connect_timeout=0.2, socket_timeout=0.2)
+        conn.ping()  # quick health check
+        logger.info("Redis is available -> using Redis for limiter/RQ.")
+        return redis_url, True
+    except Exception as e:
+        logger.warning(f"Redis check failed -> fallback to memory. reason={e}")
+        return "memory://", False
+
+
+# ===============================
+# Flask Application Factory
+# ===============================
 def create_app() -> Flask:
     root = Path(__file__).resolve().parent.parent
     app = Flask(
@@ -109,65 +129,82 @@ def create_app() -> Flask:
         instance_relative_config=True,
     )
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
-    db_path = Path(app.instance_path) / "database.db"
 
-    # --- 基本設定 ---
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    # Database configuration: PostgreSQL (production) or SQLite (development)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        # Render provides DATABASE_URL, but we need to handle postgres:// -> postgresql://
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        sqlalchemy_database_uri = database_url
+    else:
+        # Development: use SQLite
+        db_path = Path(app.instance_path) / "database.db"
+        sqlalchemy_database_uri = f"sqlite:///{db_path}"
 
-    # --- Cookie / セッション保護設定 ---
-    app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true"
-    app.config["SESSION_COOKIE_HTTPONLY"] = os.getenv("SESSION_COOKIE_HTTPONLY", "true").lower() == "true"
-    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
-    app.config["PERMANENT_SESSION_LIFETIME"] = int(os.getenv("PERMANENT_SESSION_LIFETIME", 604800))
+    # SECRET_KEY validation
+    secret_key = os.getenv("SECRET_KEY")
+    if not secret_key:
+        # Development fallback
+        if os.getenv("FLASK_ENV") == "development" or not database_url:
+            secret_key = "dev-secret-key-change-in-production"
+            logger.warning("⚠️  Using development SECRET_KEY. Set SECRET_KEY environment variable in production!")
+        else:
+            raise RuntimeError("SECRET_KEY environment variable must be set in production!")
 
-    # --- CSRF 設定（Referrer 厳格チェックを緩和：Renderでの登録フォーム対策） ---
-    app.config.setdefault("WTF_CSRF_SSL_STRICT", False)
-
-    # --- Flask-Talisman（セキュリティヘッダ / Referer 対策 / 本番HTTPS） ---
-    # Render での “Referrer missing” 回避のために referrer_policy を適切に。
-    Talisman(
-        app,
-        content_security_policy=None,  # まずはCSPを緩めて機能優先（必要に応じて強化）
-        referrer_policy="strict-origin-when-cross-origin",
-        force_https=True,              # 実運用はHTTPS前提
-        frame_options="SAMEORIGIN",
-        strict_transport_security=True,
+    app.config.update(
+        SECRET_KEY=secret_key,
+        SQLALCHEMY_DATABASE_URI=sqlalchemy_database_uri,
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true",
+        SESSION_COOKIE_HTTPONLY=os.getenv("SESSION_COOKIE_HTTPONLY", "true").lower() == "true",
+        SESSION_COOKIE_SAMESITE=os.getenv("SESSION_COOKIE_SAMESITE", "Lax"),
+        PERMANENT_SESSION_LIFETIME=int(os.getenv("PERMANENT_SESSION_LIFETIME", 604800)),
     )
 
-    # --- 拡張 ---
+    # セキュリティヘッダ（Referrer 対策・HTTPS 推奨）
+    # ローカル開発環境では force_https を無効化
+    force_https = os.getenv("FORCE_HTTPS", "false").lower() == "true"
+    Talisman(
+        app,
+        content_security_policy=None,
+        referrer_policy="strict-origin-when-cross-origin",
+        force_https=force_https,
+    )
+
+    # CSRF
     CSRFProtect(app)
 
-    # Limiter: Redis があれば使う、無ければ memory:// にフォールバック（Renderでの接続拒否対策）
-    redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
-    storage_uri = redis_url if redis_url else "memory://"
+    # Bcrypt
+    bcrypt = Bcrypt(app)
+    app.extensions['bcrypt'] = bcrypt
+
+    # Limiter: Redisが無ければmemory://へ自動フォールバック
+    limiter_storage_uri, redis_ok = choose_redis_url_or_memory()
     limiter = Limiter(
         key_func=get_remote_address,
         default_limits=["100/minute"],
-        storage_uri=storage_uri,
+        storage_uri=limiter_storage_uri,
     )
     limiter.init_app(app)
 
-    # RQ（Redis Queue）：REDIS_URL があるときだけ初期化
-    rq_queue = None
-    if redis_url:
+    # RQ（Redisキュー）: RedisがOKのときだけ有効化
+    if redis_ok:
         try:
-            rq_conn = redis_lib.from_url(redis_url)
-            rq_conn.ping()
+            rq_conn = redis_lib.from_url(os.getenv("REDIS_URL") or os.getenv("VALKEY_URL"))
             rq_queue = Queue("default", connection=rq_conn, default_timeout=180)
-            logger.info("RQ queue connected.")
+            app.extensions["rq_queue"] = rq_queue
         except Exception as e:
-            logger.warning(f"RQ init failed (continue without async): {e}")
-            rq_queue = None
-    app.extensions["rq_queue"] = rq_queue
+            logger.warning(f"RQ init failed -> disable queue. reason={e}")
+            app.extensions["rq_queue"] = None
+    else:
+        app.extensions["rq_queue"] = None
 
+    # DB + Migrate
     db.init_app(app)
-
-    # Flask-Migrate
     Migrate(app, db)
 
-    # --- ログイン ---
+    # ログイン
     login_manager = LoginManager(app)
     login_manager.login_view = "auth.login"
 
@@ -175,50 +212,86 @@ def create_app() -> Flask:
     def load_user(user_id: str):
         return User.query.get(int(user_id))
 
-    # --- 外部クライアント ---
+    # 外部APIクライアント（モデル名は存在チェック付きの実装側でマッピング）
     app.extensions["gemini_client"] = GeminiClient(
-        primary_model=os.environ.get("DEFAULT_GEMINI_MODEL", "gemini-2.0-pro"),
-        fallback_model=os.environ.get("FALLBACK_GEMINI_MODEL", "gemini-2.0-flash"),
-        api_key=os.environ.get("GEMINI_API_KEY"),
+        primary_model=os.getenv("DEFAULT_GEMINI_MODEL", "gemini-1.5-flash"),
+        fallback_model=os.getenv("FALLBACK_GEMINI_MODEL", "gemini-1.5-pro"),
+        api_key=os.getenv("GEMINI_API_KEY"),
     )
     app.extensions["search_client"] = SearchClient(
-        provider=os.environ.get("SEARCH_PROVIDER", "google_cse"),
+        provider=os.getenv("SEARCH_PROVIDER", "google_cse"),
         env=os.environ
     )
 
-    # --- 認証BP ---
+    # Blueprint登録
     from .auth import auth_bp
     app.register_blueprint(auth_bp)
 
-    # --- 初期化 ---
+    # データベーステーブルの作成
+    # 本番環境ではFlask-Migrateを使用するため、開発環境のみ自動作成
     with app.app_context():
-        db.create_all()
+        if not database_url:  # SQLite (development)
+            db.create_all()
+            logger.info("Database tables created (development mode)")
+        else:
+            logger.info("Using Flask-Migrate for database management (production mode)")
 
-    # =======================================================
-    # Core
-    # =======================================================
+    # ======================================================
+    # Core Blueprint
+    # ======================================================
     bp = Blueprint("core", __name__)
 
-    # ヘルスチェック
-    @bp.route("/healthz")
-    def healthz():
-        return jsonify(status="ok")
-
-    # 429 Too Many Requests をJSONで
-    @bp.app_errorhandler(429)
-    def handle_ratelimit(e):
-        return jsonify(error="Too Many Requests", detail=str(e.description)), 429
-
-    # ----------------- 内部ユーティリティ -----------------
     def _json():
         try:
             return request.get_json(force=True)
         except Exception:
             abort(400, description="Invalid JSON")
 
+    def _generate_summary_sync(conversation_id: int):
+        """同期的に要約とタイトルを生成（Redisがない場合の代替）"""
+        try:
+            conv = Conversation.query.get(conversation_id)
+            if not conv:
+                return
+
+            gc: GeminiClient = current_app.extensions["gemini_client"]
+            msgs = Message.query.filter_by(conversation_id=conversation_id).order_by(Message.id.asc()).all()
+            convo_dump = [{"role": m.sender, "content": m.content} for m in msgs][-100:]
+
+            analysis = gc.analyze_conversation(convo_dump)
+            new_summary = (analysis.get("summary") or "").strip()
+
+            if new_summary:
+                conv.summary = new_summary
+
+                sidebar_prompt = f"""
+以下の会話要約をもとに、サイドバーで一覧表示するための「短いタイトル」を日本語で作成してください。
+- 12〜18文字以内
+- 名詞句（文にしない／句点不要）
+- 出力は1行のみ
+要約:
+{new_summary}
+"""
+                short_title, _ = gc.chat([], sidebar_prompt)
+                short_title = (short_title or "").strip().splitlines()[0]
+                if not short_title:
+                    short_title = (new_summary[:18] or "会話").strip()
+
+                conv.title = short_title
+                conv.updated_at = datetime.utcnow()
+                db.session.commit()
+                logger.info(f"✅ Generated summary/title for conversation {conversation_id}")
+        except Exception as e:
+            logger.warning(f"Summary generation failed: {e}")
+
     def _admin_required():
-        if not (current_user.is_authenticated and current_user.is_admin):
+        if not (current_user.is_authenticated and getattr(current_user, "is_admin", False)):
             abort(403, description="admin required")
+
+    # ----------------- Health -----------------
+    @bp.route("/healthz")
+    def healthz():
+        return jsonify(status="ok")
 
     # ----------------- Pages -----------------
     @bp.route("/")
@@ -230,26 +303,31 @@ def create_app() -> Flask:
     @bp.route("/chat")
     @login_required
     def chat():
-        latest_announcement = Announcement.query.filter_by(is_active=True)\
-            .order_by(Announcement.timestamp.desc())\
-            .first()
+        latest_announcement = Announcement.query.filter_by(is_active=True) \
+            .order_by(Announcement.timestamp.desc()).first()
         return render_template(
             "chat.html",
             username=current_user.username,
-            is_admin=bool(current_user.is_admin),
-            conversation_id=datetime.utcnow().strftime("%Y%m%d%H%M%S%f"),
+            is_admin=bool(getattr(current_user, "is_admin", False)),
             announcement=latest_announcement
         )
 
-    # ----------------- Admin -----------------
+    # ----------------- Admin Dashboard -----------------
     @bp.route("/admin_dashboard")
     @login_required
     def admin_dashboard():
         _admin_required()
         users = User.query.order_by(User.id.asc()).all()
-        conversations = Conversation.query.order_by(Conversation.is_pinned.desc(), Conversation.id.desc()).limit(100).all()
-        announcements = Announcement.query.order_by(Announcement.timestamp.desc().nullslast()).all()
-        return render_template("admin_dashboard.html", users=users, conversations=conversations, announcements=announcements)
+        conversations = Conversation.query.order_by(
+            Conversation.is_pinned.desc(), Conversation.id.desc()
+        ).limit(100).all()
+        announcements = Announcement.query.order_by(
+            Announcement.timestamp.desc().nullslast()
+        ).all()
+        return render_template(
+            "admin_dashboard.html",
+            users=users, conversations=conversations, announcements=announcements
+        )
 
     @bp.route("/admin/announcement/add", methods=["POST"])
     @login_required
@@ -309,7 +387,7 @@ def create_app() -> Flask:
         db.session.commit()
         return redirect(url_for("core.admin_dashboard"))
 
-    # ----------------- Conversations API (Sidebar) -----------------
+    # ----------------- Conversations API -----------------
     @bp.route("/api/conversations", methods=["GET"])
     @login_required
     def list_conversations():
@@ -325,8 +403,8 @@ def create_app() -> Flask:
                     continue
             out.append({
                 "id": c.id,
-                "title": c.title,                 # ← サイドバー表示
-                "summary": (c.summary or ""),     # ← 上部要約
+                "title": c.title,
+                "summary": (c.summary or ""),
                 "is_pinned": bool(c.is_pinned),
                 "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else "",
             })
@@ -369,12 +447,12 @@ def create_app() -> Flask:
         db.session.commit()
         return jsonify({"ok": True})
 
-    # ----------------- History (summary付き + 安全HTML） -----------------
+    # ----------------- History (summary付き) -----------------
     @bp.route("/api/history/<int:conversation_id>", methods=["GET"])
     @login_required
     def api_history(conversation_id: int):
         conv = Conversation.query.filter_by(id=conversation_id, user_id=current_user.id).first()
-        if not conv and not current_user.is_admin:
+        if not conv and not getattr(current_user, "is_admin", False):
             abort(404)
         msgs = Message.query.filter_by(conversation_id=conversation_id).order_by(Message.id.asc()).all()
         data = [{
@@ -389,7 +467,7 @@ def create_app() -> Flask:
             "summary": conv.summary or ""
         })
 
-    # ----------------- Chat（天気/ニュースは検索経由で“今日”に強制寄せ） -----------------
+    # ----------------- Chat API（鮮度ロジック内蔵） -----------------
     @bp.route("/api/chat", methods=["POST"])
     @login_required
     def api_chat():
@@ -398,140 +476,87 @@ def create_app() -> Flask:
         if not msg:
             abort(400, description="message is required")
 
-        # 会話ID：未指定/不正なら新規作成
         cid = data.get("conversation_id")
-        conv = None
-        if cid:
-            conv = Conversation.query.filter_by(id=cid, user_id=current_user.id).first()
+        conv = Conversation.query.filter_by(id=cid, user_id=current_user.id).first() if cid else None
         if not conv:
-            conv = Conversation(title=f"新しい会話 {datetime.utcnow().strftime('%H:%M:%S')}", user_id=current_user.id, is_pinned=False)
-            db.session.add(conv); db.session.commit()
+            conv = Conversation(
+                title=f"新しい会話 {datetime.utcnow().strftime('%H:%M:%S')}",
+                user_id=current_user.id, is_pinned=False
+            )
+            db.session.add(conv)
+            db.session.commit()
             cid = conv.id
 
-        # 直近履歴（チャット用）
-        last_msgs = Message.query.filter_by(conversation_id=cid).order_by(Message.id.asc()).all()
-        history = [{"role": m.sender, "content": m.content} for m in last_msgs][-50:]
-
-        # 1) 先にユーザ発言を保存
+        # 保存（ユーザ発話）
         db.session.add(Message(content=msg, sender="user", conversation_id=cid))
         db.session.commit()
 
-        # --- 鮮度ロジック：天気/ニュースのときは検索経由で回答 ---
+        # 天気／ニュース判定 → 検索優先
         q_lower = msg.lower()
-        is_weather = any(w in msg for w in ["天気", "天候", "予報"]) or any(w in q_lower for w in ["weather", "forecast"])
-        is_news    = any(w in msg for w in ["ニュース", "速報"]) or any(w in q_lower for w in ["news", "headline", "breaking"])
+        is_weather = any(w in msg for w in ["天気", "天候", "予報"]) or "weather" in q_lower or "forecast" in q_lower
+        is_news = any(w in msg for w in ["ニュース", "速報"]) or "news" in q_lower or "headline" in q_lower
 
         if is_weather or is_news:
             try:
                 JST = timezone(timedelta(hours=9))
-                today_jst = datetime.now(JST).date()
-                yyyy = today_jst.year; mm = today_jst.month; dd = today_jst.day
-                jp_full = f"{yyyy}年{mm}月{dd}日"
-                iso1 = f"{yyyy}-{mm:02d}-{dd:02d}"
-                en1  = datetime.now(JST).strftime("%b %d, %Y")
-
-                # 言語/ジオ
-                is_japanese = bool(re.search(r"[ぁ-んァ-ン一-龥]", msg))
-                gl = "jp" if is_japanese else None
-                lr = "lang_ja" if is_japanese else None
-
-                # 信頼ドメインに寄せる
-                def add_site_bias(q: str) -> str:
-                    if is_weather:
-                        site = "site:tenki.jp OR site:weather.yahoo.co.jp OR site:jma.go.jp OR site:weather.com"
-                        return f"{q} {site}"
-                    if is_news:
-                        site = "site:news.yahoo.co.jp OR site:www3.nhk.or.jp OR site:asahi.com OR site:mainichi.jp OR site:nikkei.com"
-                        return f"{q} {site}"
-                    return q
+                today = datetime.now(JST)
+                jp_full = f"{today.year}年{today.month}月{today.day}日"
+                iso1 = today.strftime("%Y-%m-%d")
 
                 sc: SearchClient = current_app.extensions["search_client"]
                 gc: GeminiClient = current_app.extensions["gemini_client"]
 
-                # 今日の日付を付与して 24h に寄せる
-                query1 = add_site_bias(f"{msg} {jp_full}")
-                results = sc.search(query1, top_k=5, recency_days=1, gl=gl, lr=lr)
+                site_bias = (
+                    "site:tenki.jp OR site:weather.yahoo.co.jp OR site:jma.go.jp OR site:weather.com"
+                    if is_weather else
+                    "site:news.yahoo.co.jp OR site:www3.nhk.or.jp OR site:asahi.com OR site:mainichi.jp OR site:nikkei.com"
+                )
+                query1 = f"{msg} {jp_full} {site_bias}"
+                results = sc.search(query1, top_k=10, recency_days=1)
 
-                date_patterns = [jp_full, f"{mm}月{dd}日", iso1, f"{yyyy}/{mm:02d}/{dd:02d}", en1]
+                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用してください。過去日付は除外。"
+                composed = guard + "\n\nユーザー入力: " + msg
+                summary = gc.summarize_with_citations(composed, results, (data.get("model") or "").strip())
 
-                def filter_today(rs):
-                    outs = []
-                    for r in rs:
-                        hay = f"{r.get('title','')} {r.get('snippet','')} {r.get('url','')}"
-                        if any(p in hay for p in date_patterns):
-                            outs.append(r)
-                    return outs
-
-                today_hits = filter_today(results)
-
-                if not today_hits:
-                    # 緩めて48h
-                    query2 = add_site_bias(msg)
-                    results = sc.search(query2, top_k=5, recency_days=2, gl=gl, lr=lr)
-                    today_hits = filter_today(results)
-
-                final_results = today_hits or results
-
-                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用し、過去日付は無視してください。出典の更新日時を確認し、曖昧なら『最新の公式情報を確認してください』と注記。"
-                composed_query = guard + "\n\nユーザー入力: " + msg
-                summary = gc.summarize_with_citations(composed_query, final_results, (request.args.get("model") or "").strip())
-
-                reply = summary.get("answer") or summary.get("summary") or summary.get("text") or summary.get("content")
-                if not reply:
-                    bullets = "\n".join([f"- [{r['title']}]({r['url']})" for r in final_results])
-                    reply = f"最新の情報ソースです（{jp_full} 時点）。\n\n{bullets}"
-
-                used = "search+summarize"
-
-                # 保存
+                reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "情報を取得できませんでした。"
                 db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
                 db.session.commit()
 
-                # 要約＋タイトル生成は RQ があれば非同期
-                try:
-                    q = current_app.extensions.get("rq_queue")
-                    if q is not None:
-                        q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
-                    else:
-                        logger.info("RQ not available; skip async summarization.")
-                except Exception as e:
-                    logger.warning(f"enqueue summary job failed: {e}")
+                # バックグラウンドタスクでサマリー・タイトル生成（Redisがなければ同期実行）
+                q = current_app.extensions.get("rq_queue")
+                if q:
+                    q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+                else:
+                    # Redisがない場合は同期的に生成
+                    _generate_summary_sync(cid)
 
                 return jsonify({
-                    "ok": True,
-                    "reply": reply,
+                    "ok": True, "reply": reply,
                     "reply_html": render_markdown_safe(reply),
-                    "model": used,
                     "conversation_id": cid
                 })
+            except Exception as e:
+                logger.warning(f"Search path failed, fallback to normal chat. reason={e}")
 
-            except SearchError as e:
-                logger.warning(f"fresh search in chat failed: {e}")
-                # 検索失敗時は通常チャットにフォールバック
-
-        # --- 通常のGeminiチャット ---
-        gemini: GeminiClient = current_app.extensions["gemini_client"]
+        # 通常チャット
+        gc: GeminiClient = current_app.extensions["gemini_client"]
         try:
-            reply, used = gemini.chat(
-                messages=history,
-                user_message=msg,
-                requested_model=(data.get("model") or "").strip()
-            )
+            history = [{"role": m.sender, "content": m.content}
+                       for m in Message.query.filter_by(conversation_id=cid).order_by(Message.id.asc()).all()][-50:]
+            reply, used = gc.chat(history, msg, requested_model=(data.get("model") or "").strip())
         except GeminiFallbackError as e:
-            return jsonify({"ok": False, "error": "Gemini fallback failed", "details": str(e)}), 502
+            return jsonify({"ok": False, "error": str(e)}), 502
 
         db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
         db.session.commit()
 
-        # 要約＋タイトル生成は RQ があれば非同期
-        try:
-            q = current_app.extensions.get("rq_queue")
-            if q is not None:
-                q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
-            else:
-                logger.info("RQ not available; skip async summarization.")
-        except Exception as e:
-            logger.warning(f"enqueue summary job failed: {e}")
+        # バックグラウンドタスクでサマリー・タイトル生成（Redisがなければ同期実行）
+        q = current_app.extensions.get("rq_queue")
+        if q:
+            q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+        else:
+            # Redisがない場合は同期的に生成
+            _generate_summary_sync(cid)
 
         return jsonify({
             "ok": True,
@@ -541,7 +566,7 @@ def create_app() -> Flask:
             "conversation_id": cid
         })
 
-    # ----------------- Search + Summarize（鮮度＆日付ガード付き） -----------------
+    # ----------------- Search + Summarize（独立API） -----------------
     @bp.route("/api/search_summarize", methods=["POST"])
     @login_required
     def api_search_summarize():
@@ -550,88 +575,82 @@ def create_app() -> Flask:
         if not query:
             abort(400, description="query is required")
 
+        # 会話IDを取得または作成
+        cid = data.get("conversation_id")
+        conv = Conversation.query.filter_by(id=cid, user_id=current_user.id).first() if cid else None
+        if not conv:
+            conv = Conversation(
+                title=f"新しい会話 {datetime.utcnow().strftime('%H:%M:%S')}",
+                user_id=current_user.id, is_pinned=False
+            )
+            db.session.add(conv)
+            db.session.commit()
+            cid = conv.id
+
+        # ユーザーメッセージを保存
+        db.session.add(Message(content=query, sender="user", conversation_id=cid))
+        db.session.commit()
+
         JST = timezone(timedelta(hours=9))
-        today_jst = datetime.now(JST).date()
-        yyyy = today_jst.year
-        mm = today_jst.month
-        dd = today_jst.day
-        jp_full = f"{yyyy}年{mm}月{dd}日"
-        jp_md   = f"{mm}月{dd}日"
-        iso1    = f"{yyyy}-{mm:02d}-{dd:02d}"
-        iso2    = f"{yyyy}/{mm:02d}/{dd:02d}"
-        en1     = datetime.now(JST).strftime("%b %d, %Y")
-        date_patterns = [jp_full, jp_md, iso1, iso2, en1]
-
-        q_lower = query.lower()
-        is_weather = any(w in query for w in ["天気", "天候", "予報"]) or any(w in q_lower for w in ["weather", "forecast"])
-        is_news    = any(w in query for w in ["ニュース", "速報"]) or any(w in q_lower for w in ["news", "headline", "breaking"])
-
-        is_japanese = bool(re.search(r"[ぁ-んァ-ン一-龥]", query))
-        gl = "jp" if is_japanese else None
-        lr = "lang_ja" if is_japanese else None
+        today = datetime.now(JST)
+        jp_full = f"{today.year}年{today.month}月{today.day}日"
+        iso1 = today.strftime("%Y-%m-%d")
 
         sc: SearchClient = current_app.extensions["search_client"]
         gc: GeminiClient = current_app.extensions["gemini_client"]
 
-        def add_site_bias(q: str) -> str:
-            if is_weather:
-                site = "site:tenki.jp OR site:weather.yahoo.co.jp OR site:weather.com OR site:jma.go.jp"
-                return f"{q} {site}"
-            if is_news:
-                site = "site:news.yahoo.co.jp OR site:www3.nhk.or.jp OR site:news.livedoor.com OR site:asahi.com OR site:mainichi.jp OR site:nikkei.com"
-                return f"{q} {site}"
-            return q
-
-        def filter_today(results):
-            out = []
-            for r in results:
-                hay = f"{r.get('title','')} {r.get('snippet','')} {r.get('url','')}"
-                if any(p in hay for p in date_patterns):
-                    out.append(r)
-            return out
-
-        base_q = query
-        if is_weather or is_news:
-            base_q = f"{query} {jp_full}"
-        biased_q = add_site_bias(base_q)
-
         try:
-            results = sc.search(
-                biased_q,
-                top_k=int(data.get("top_k") or 5),
-                recency_days=1,
-                gl=gl,
-                lr=lr,
-            )
+            # クエリタイプを判定
+            date_keywords = ["日付", "今日", "date", "today"]
+            time_sensitive_keywords = ["天気", "天候", "予報", "ニュース", "速報", "weather", "forecast", "news"]
+
+            is_date_query = any(kw in query.lower() for kw in date_keywords)
+            is_time_sensitive = any(kw in query.lower() for kw in time_sensitive_keywords)
+
+            # 検索クエリの構築
+            search_query = query if is_date_query else f"{query} {jp_full}"
+
+            # 鮮度フィルタを動的に設定
+            if is_time_sensitive:
+                recency = 1  # 天気・ニュース: 過去1日
+            else:
+                recency = 7  # その他: 過去7日
+
+            results = sc.search(search_query, top_k=int(data.get("top_k") or 10), recency_days=recency)
         except SearchError as e:
+            error_msg = f"検索エラー: {str(e)}"
+            db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
+            db.session.commit()
             return jsonify({"ok": False, "error": str(e)}), 502
 
-        today_hits = filter_today(results)
-        if not today_hits:
-            try:
-                results = sc.search(
-                    add_site_bias(query),
-                    top_k=int(data.get("top_k") or 5),
-                    recency_days=2,
-                    gl=gl,
-                    lr=lr,
-                )
-            except SearchError as e:
-                return jsonify({"ok": False, "error": str(e)}), 502
-            today_hits = filter_today(results)
-
-        final_results = today_hits or results
-
-        guard_note = f"""
-今日は {iso1}（JST）です。今日の情報のみを採用し、過去日付は無視してください。
-本文に日付が無い場合は、見出し・URL・更新時刻を確認して判断してください。
-""".strip()
-
         try:
-            composed_query = guard_note + "\n\nユーザーの要望: " + query
-            summary = gc.summarize_with_citations(composed_query, final_results, (data.get("model") or "").strip())
-            return jsonify({"ok": True, **summary})
+            # 日付クエリの場合は、現在の日付を明示的に伝える
+            if is_date_query:
+                guard = f"今日の日付は {iso1}（{jp_full}、JST）です。ユーザーが「今日の日付」を尋ねている場合、この日付を直接答えてください。"
+            else:
+                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用し、過去日付は除外。"
+
+            composed = guard + "\n\nユーザーの要望: " + query
+            summary = gc.summarize_with_citations(composed, results, (data.get("model") or "").strip())
+
+            # アシスタントの応答を保存
+            reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "情報を取得できませんでした。"
+            db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+            db.session.commit()
+
+            # バックグラウンドタスクでサマリーとタイトルを生成（Redisがなければ同期実行）
+            q = current_app.extensions.get("rq_queue")
+            if q:
+                q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+            else:
+                # Redisがない場合は同期的に生成
+                _generate_summary_sync(cid)
+
+            return jsonify({"ok": True, "conversation_id": cid, **summary})
         except GeminiFallbackError as e:
+            error_msg = f"サマリー生成エラー: {str(e)}"
+            db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
+            db.session.commit()
             return jsonify({"ok": False, "error": "summarization failed", "details": str(e)}), 502
 
     # ----------------- Export -----------------
@@ -641,7 +660,7 @@ def create_app() -> Flask:
         conv = Conversation.query.get(cid)
         if not conv:
             abort(404)
-        if conv.user_id != current_user.id and not current_user.is_admin:
+        if conv.user_id != current_user.id and not getattr(current_user, "is_admin", False):
             abort(403)
         messages = Message.query.filter_by(conversation_id=cid).all()
         return jsonify({
@@ -651,7 +670,7 @@ def create_app() -> Flask:
             "messages": [{"role": m.sender, "content": m.content} for m in messages]
         })
 
-    # ----------------- Error handlers -----------------
+    # ----------------- Error Handlers -----------------
     @bp.errorhandler(CSRFError)
     def handle_csrf(e):
         return jsonify({"ok": False, "error": "CSRF validation failed", "details": e.description}), 400
@@ -663,4 +682,6 @@ def create_app() -> Flask:
 
     app.register_blueprint(bp)
     return app
+
+
 

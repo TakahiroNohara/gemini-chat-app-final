@@ -1,10 +1,8 @@
-# services/gemini_client.py
+# services/gemini_client_http.py
 import os
 import logging
+import requests
 from typing import List, Dict, Any, Tuple, Optional
-
-import google.generativeai as genai
-from google.api_core import exceptions as gexc
 
 logger = logging.getLogger(__name__)
 
@@ -59,47 +57,79 @@ class GeminiClient:
         self.primary_model = _norm(primary_model or "gemini-2.5-pro")
         self.fallback_model = _norm(fallback_model or "gemini-2.5-flash")
 
-        genai.configure(
-            api_key=self.api_key,
-            client_options={"api_endpoint": f"https://generativelanguage.googleapis.com/{self.api_version}"},
-        )
+        self.base_url = f"https://generativelanguage.googleapis.com/{self.api_version}"
 
         logger.info(
-            f"[Gemini] api_version={self.api_version} primary={self.primary_model} "
+            f"[Gemini HTTP] api_version={self.api_version} primary={self.primary_model} "
             f"fallback={self.fallback_model}"
         )
 
     # --------------------------------
-    # 内部：生成 API 呼び出し（フォーマット吸収）
+    # 内部：生成 API 呼び出し（HTTP版）
     # --------------------------------
     def _run_generate(self, model: str, contents: List[Dict[str, str]]) -> str:
         """
         contents は chat 風 [{"role":"user","content":"..."}, ...] を受け取り、
-        GenerativeModel が期待する [{"role":..., "parts":[{"text":...}]}] に正規化する。
+        Gemini API が期待する [{"role":..., "parts":[{"text":...}]}] に正規化する。
         """
         try:
-            def norm_contents(msgs):
-                out = []
-                for m in msgs:
-                    role = m.get("role") or ("user" if m.get("content") else "model")
-                    text = m.get("content") or m.get("text") or ""
-                    out.append({"role": role, "parts": [{"text": text}]})
-                return out
+            # メッセージを正規化
+            normalized_contents = []
+            for m in contents:
+                role = m.get("role") or ("user" if m.get("content") else "model")
+                text = m.get("content") or m.get("text") or ""
+                normalized_contents.append({"role": role, "parts": [{"text": text}]})
 
-            data = norm_contents(contents)
-            # タイムアウト設定付きで生成
-            generation_config = {
-                "temperature": 0.7,
-                "max_output_tokens": 2048,
+            # リクエストボディ
+            payload = {
+                "contents": normalized_contents,
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 2048,
+                }
             }
-            resp = genai.GenerativeModel(model).generate_content(
-                data,
-                generation_config=generation_config
-            )
-            return (getattr(resp, "text", None) or "").strip()
-        except gexc.GoogleAPICallError:
-            # 上位でフォールバック処理するためそのまま投げる
-            raise
+
+            # エンドポイント
+            url = f"{self.base_url}/models/{model}:generateContent?key={self.api_key}"
+
+            # HTTPリクエスト送信
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+
+            # エラーハンドリング
+            if response.status_code != 200:
+                error_msg = f"HTTP {response.status_code}: {response.text}"
+                logger.error(f"Gemini API error: {error_msg}")
+                if response.status_code == 404:
+                    raise GeminiFallbackError(f"Model not found: {model}")
+                elif response.status_code == 429:
+                    raise GeminiFallbackError("Rate limit exceeded")
+                else:
+                    raise GeminiFallbackError(error_msg)
+
+            # レスポンスパース
+            result = response.json()
+            candidates = result.get("candidates", [])
+            if not candidates:
+                logger.warning(f"No candidates in response for model {model}")
+                return ""
+
+            # テキスト取得
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if not parts:
+                logger.warning(f"No parts in response for model {model}")
+                return ""
+
+            text = parts[0].get("text", "").strip()
+            return text
+
+        except requests.exceptions.Timeout:
+            logger.error(f"Request timeout for model {model}")
+            raise GeminiFallbackError(f"Request timeout for model {model}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error for model {model}: {e}")
+            raise GeminiFallbackError(f"Request error: {str(e)}")
 
     def _chat_once(self, model: str, messages: List[Dict[str, str]], user_message: str) -> str:
         payload = []
@@ -134,16 +164,8 @@ class GeminiClient:
                 if out:
                     logger.info(f"Success with model: {m}")
                     return out, m
-            except gexc.NotFound as e:
-                logger.error(f"Gemini error on {m}: NotFound: {e}")
-                last_err = e
-                continue
-            except gexc.DeadlineExceeded as e:
-                logger.error(f"Gemini timeout on {m}: {e}")
-                last_err = e
-                continue
-            except gexc.GoogleAPICallError as e:
-                logger.error(f"Gemini API error on {m}: {e}")
+            except GeminiFallbackError as e:
+                logger.error(f"Gemini error on {m}: {e}")
                 last_err = e
                 continue
             except Exception as e:
@@ -188,12 +210,16 @@ class GeminiClient:
             snip = r.get("snippet", "")
             lines.append(f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n")
         lines.append(
-            "\n指示: 上記の信頼できる情報のみを用いて、簡潔に日本語で要約してください。"
-            "不明点は『不明』と明記し、推測しないでください。最後に参考URLを列挙してください。"
+            "\n指示: 上記の参考資料を分析し、以下の手順で回答してください。\n"
+            "1. 複数の情報源で一致する内容を重視してください\n"
+            "2. 信頼性の高い情報源（政府機関、報道機関、学術機関）を優先してください\n"
+            "3. 最新の情報を優先し、古い情報は参考程度にしてください\n"
+            "4. 矛盾する情報がある場合は、より信頼できる情報源を採用してください\n"
+            "5. 不明点は『不明』と明記し、推測しないでください\n"
+            "6. 回答は簡潔かつ具体的に、箇条書きを活用してください\n"
+            "7. 最後に参考にした主要なURLを列挙してください"
         )
         prompt = "\n".join(lines)
 
         text, used = self.chat([], prompt, requested_model=requested_model or self.primary_model)
         return {"answer": text, "model": used}
-
-

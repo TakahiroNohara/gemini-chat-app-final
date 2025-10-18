@@ -99,7 +99,7 @@
       t = t.replace(/^#{1,6}\s*/, "").replace(/^>\s*/, "").replace(/`{1,3}/g, "");
       return t.replace(/\s+/g, " ").trim();
     }
-    function limitLen(s, max = 34) {
+    function limitLen(s, max = 20) {
       if (!s) return "";
       return s.length > max ? s.slice(0, max - 1) + "…" : s;
     }
@@ -107,7 +107,7 @@
       const base = (c.title && c.title.trim())
         ? c.title.trim()
         : (trimOneLine(c.summary || "") || "会話");
-      return limitLen(base, 34);
+      return limitLen(base, 20);
     }
 
     // ---------- サイドバー行 ----------
@@ -206,18 +206,6 @@
       }
     }
 
-    // ---------- Web検索API（/api/search_summarize） ----------
-    async function searchAndSummarize(queryText) {
-      const payload = {
-        query: queryText,
-        top_k: 5,
-        model: (modelSel && modelSel.value) ? modelSel.value : ""
-      };
-      const data = await ajaxWithTimeout("/api/search_summarize", "POST", payload, 15000);
-      const refs = (data.citations || []).map(c => ({ title: c.title, url: c.url }));
-      return { summary: data.summary || "", refs };
-    }
-
     // ---------- 送信 ----------
     async function doSend() {
       const text = input.value.trim();
@@ -236,37 +224,39 @@
         render("user", text);
         input.value = "";
 
-        // 1) 通常チャット返信
-        const chatPayload = {
-          conversation_id: currentConversationId,
-          history: [],
-          message: text,
-          model: (modelSel && modelSel.value) ? modelSel.value : ""
-        };
-        const chatData = await ajax("/api/chat", "POST", chatPayload);
-        render("assistant", chatData.reply || "(no reply)");
+        const useWebSearch = websearchToggle && websearchToggle.checked;
 
-        // 2) Web検索トグルがONなら、検索→要約も続けて出す（失敗してもチャットは出る）
-        if (websearchToggle && websearchToggle.checked) {
-          try {
-            const { summary, refs } = await searchAndSummarize(text);
-            if (summary) {
-              render("assistant", summary, refs);
-            } else {
-              render("assistant", "（Web要約：該当情報の抽出に失敗しました）");
-            }
-          } catch (e) {
-            render("assistant", "（Web要約エラー: " + e.message + "）");
-          }
+        if (useWebSearch) {
+          // Web検索を使用する場合
+          const searchPayload = {
+            conversation_id: currentConversationId,
+            query: text,
+            model: (modelSel && modelSel.value) ? modelSel.value : "",
+            top_k: 10
+          };
+
+          const chatData = await ajaxWithTimeout("/api/search_summarize", "POST", searchPayload, 20000);
+          const reply = chatData.answer || chatData.summary || chatData.text || "(no reply)";
+          const refs = (chatData.citations || []).map(c => ({ title: c.title, url: c.url }));
+          render("assistant", reply, refs);
+        } else {
+          // 通常のチャット
+          const chatPayload = {
+            conversation_id: currentConversationId,
+            message: text,
+            model: (modelSel && modelSel.value) ? modelSel.value : ""
+          };
+          const chatData = await ajax("/api/chat", "POST", chatPayload);
+          render("assistant", chatData.reply || "(no reply)");
         }
 
-        // 3) 要約（会話全体）を最新化
+        // 要約（会話全体）を最新化
         try {
           const h = await ajax(`/api/history/${currentConversationId}`);
           setSummary(h.summary || "");
         } catch (_) {}
 
-        // 4) サイドバーのタイトル更新反映
+        // サイドバーのタイトル更新反映
         await loadConversations();
 
       } catch (e) {
@@ -281,9 +271,9 @@
     sendBtn.style.pointerEvents = "auto";
     sendBtn.addEventListener("click", doSend);
 
-    // Enter=改行 / Shift+Enter=送信
+    // Enterで送信 / Shift+Enterで改行
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         doSend();
       }

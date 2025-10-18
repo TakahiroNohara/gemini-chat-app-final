@@ -16,6 +16,8 @@ Flask-Migrate
 alembic
 markdown
 bleach
+psycopg2-binary
+requests
 
 
 

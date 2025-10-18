@@ -1,15 +1,19 @@
 # app/auth.py
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 from flask_login import login_user, logout_user, login_required
-from flask_bcrypt import Bcrypt
 from .models import db, User
 
 auth_bp = Blueprint("auth", __name__)
-bcrypt = Bcrypt()
+
+# Bcryptインスタンスは app/__init__.py で初期化されるため、ここでは遅延インポート
+def get_bcrypt():
+    from flask import current_app
+    return current_app.extensions.get('bcrypt')
 
 @auth_bp.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        bcrypt = get_bcrypt()
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()
         user = User.query.filter_by(username=username).first()
@@ -26,6 +30,7 @@ def login():
 @auth_bp.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
+        bcrypt = get_bcrypt()
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()
         if not username or not password:
@@ -49,6 +54,7 @@ def logout():
 @auth_bp.route("/admin_login", methods=["GET", "POST"])
 def admin_login():
     if request.method == "POST":
+        bcrypt = get_bcrypt()
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()
         user = User.query.filter_by(username=username).first()
@@ -60,7 +66,7 @@ def admin_login():
     return render_template("admin_login.html")
 
 # Blueprintエクスポート
-__all__ = ["auth_bp", "bcrypt"]
+__all__ = ["auth_bp", "get_bcrypt"]
 
 
 
