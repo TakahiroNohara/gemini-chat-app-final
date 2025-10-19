@@ -119,10 +119,9 @@ class SearchClient:
 
         # ヘルパー関数: 重複を避けて結果を追加
         def _add_unique(results: List[Dict[str, Any]]) -> int:
-            """重複を避けて結果リストに追加し、追加された数を返す"""
             added = 0
             for r in results:
-                url = r.get("url", "")
+                url = r.get("info_link") or r.get("link")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_results.append(r)
