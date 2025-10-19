@@ -85,7 +85,7 @@ class GeminiClient:
                 "contents": normalized_contents,
                 "generationConfig": {
                     "temperature": 0.7,
-                    "maxOutputTokens": 2048,
+                    "maxOutputTokens": 4096,  # より長い要約に対応
                 }
             }
 
@@ -94,7 +94,7 @@ class GeminiClient:
 
             # HTTPリクエスト送信
             headers = {"Content-Type": "application/json"}
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response = requests.post(url, json=payload, headers=headers, timeout=120)  # 2分 - 長いコンテンツ要約に対応
 
             # エラーハンドリング
             if response.status_code != 200:
@@ -208,16 +208,23 @@ class GeminiClient:
             title = r.get("title", "")
             url = r.get("url", "")
             snip = r.get("snippet", "")
-            lines.append(f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n")
+            lines.append(f"[{i}] {title}\nURL: {url}\n内容: {snip}\n")
+
         lines.append(
-            "\n指示: 上記の参考資料を分析し、以下の手順で回答してください。\n"
-            "1. 複数の情報源で一致する内容を重視してください\n"
-            "2. 信頼性の高い情報源（政府機関、報道機関、学術機関）を優先してください\n"
-            "3. 最新の情報を優先し、古い情報は参考程度にしてください\n"
-            "4. 矛盾する情報がある場合は、より信頼できる情報源を採用してください\n"
-            "5. 不明点は『不明』と明記し、推測しないでください\n"
-            "6. 回答は簡潔かつ具体的に、箇条書きを活用してください\n"
-            "7. 最後に参考にした主要なURLを列挙してください"
+            "\n**指示:**\n"
+            "上記の参考資料を徹底的に分析し、ユーザーの要望に答えてください。\n\n"
+            "**分析手順:**\n"
+            "1. すべての参考資料を注意深く読み、関連する情報を抽出する\n"
+            "2. 複数の情報源で一致する内容を重視し、信頼性を確保する\n"
+            "3. 情報源の信頼性を評価（公式サイト、書評サイト、専門家の意見などを優先）\n"
+            "4. 矛盾する情報がある場合は、より詳細で信頼できる情報源を採用する\n"
+            "5. 検索結果に含まれる情報から、ユーザーの要望に最も関連する内容を抽出する\n"
+            "6. 情報を統合し、包括的で分かりやすい回答を作成する\n\n"
+            "**回答の形式:**\n"
+            "- できる限り具体的に説明してください\n"
+            "- 箇条書きや段落を適切に使い、読みやすく構成してください\n"
+            "- 検索結果から得られた情報を最大限活用してください\n"
+            "- 最後に、参考にした主要な情報源のURLを列挙してください"
         )
         prompt = "\n".join(lines)
 

@@ -23,7 +23,7 @@
   }
 
   // /api/search_summarize 用のタイムアウト付き呼び出し（安全策）
-  async function ajaxWithTimeout(url, method, body, timeoutMs = 15000) {
+  async function ajaxWithTimeout(url, method, body, timeoutMs = 180000) {  // 3分 - 長い検索・要約処理に対応
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -57,6 +57,21 @@
     let sending = false;
 
     // ---------- UIヘルパ ----------
+    function showLoading(message = "処理中...") {
+      const div = document.createElement("div");
+      div.className = "loading-indicator";
+      div.textContent = message;
+      div.id = "loading-indicator";
+      msgBox.appendChild(div);
+      msgBox.scrollTop = msgBox.scrollHeight;
+      return div;
+    }
+
+    function hideLoading() {
+      const loader = document.getElementById("loading-indicator");
+      if (loader) loader.remove();
+    }
+
     function render(role, text, refs = []) {
       const div = document.createElement("div");
       div.className = "msg " + role;
@@ -226,28 +241,42 @@
 
         const useWebSearch = websearchToggle && websearchToggle.checked;
 
+        // ローディング表示
         if (useWebSearch) {
-          // Web検索を使用する場合
-          const searchPayload = {
-            conversation_id: currentConversationId,
-            query: text,
-            model: (modelSel && modelSel.value) ? modelSel.value : "",
-            top_k: 10
-          };
-
-          const chatData = await ajaxWithTimeout("/api/search_summarize", "POST", searchPayload, 20000);
-          const reply = chatData.answer || chatData.summary || chatData.text || "(no reply)";
-          const refs = (chatData.citations || []).map(c => ({ title: c.title, url: c.url }));
-          render("assistant", reply, refs);
+          showLoading("Web検索中... (最大3分かかることがあります)");
         } else {
-          // 通常のチャット
-          const chatPayload = {
-            conversation_id: currentConversationId,
-            message: text,
-            model: (modelSel && modelSel.value) ? modelSel.value : ""
-          };
-          const chatData = await ajax("/api/chat", "POST", chatPayload);
-          render("assistant", chatData.reply || "(no reply)");
+          showLoading("応答生成中...");
+        }
+
+        try {
+          if (useWebSearch) {
+            // Web検索を使用する場合
+            const searchPayload = {
+              conversation_id: currentConversationId,
+              query: text,
+              model: (modelSel && modelSel.value) ? modelSel.value : "",
+              top_k: 10
+            };
+
+            const chatData = await ajaxWithTimeout("/api/search_summarize", "POST", searchPayload, 180000);  // 3分
+            const reply = chatData.answer || chatData.summary || chatData.text || "(no reply)";
+            const refs = (chatData.citations || []).map(c => ({ title: c.title, url: c.url }));
+            hideLoading();
+            render("assistant", reply, refs);
+          } else {
+            // 通常のチャット
+            const chatPayload = {
+              conversation_id: currentConversationId,
+              message: text,
+              model: (modelSel && modelSel.value) ? modelSel.value : ""
+            };
+            const chatData = await ajax("/api/chat", "POST", chatPayload);
+            hideLoading();
+            render("assistant", chatData.reply || "(no reply)");
+          }
+        } catch (e) {
+          hideLoading();
+          throw e;
         }
 
         // 要約（会話全体）を最新化

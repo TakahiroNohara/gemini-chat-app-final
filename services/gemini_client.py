@@ -196,4 +196,218 @@ class GeminiClient:
         text, used = self.chat([], prompt, requested_model=requested_model or self.primary_model)
         return {"answer": text, "model": used}
 
+    def _enrich_search_results_with_webfetch(
+        self,
+        search_results: List[Dict[str, str]],
+        max_fetch: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """
+        検索結果の上位を WebFetch で取得してコンテンツを強化
+
+        Args:
+            search_results: 検索結果リスト
+            max_fetch: WebFetch を実行する最大件数（デフォルト2件）
+
+        Returns:
+            enriched_content フィールドを追加した検索結果
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests
+
+        enriched_results = []
+
+        # WebFetch を実行する対象を選択（信頼できるドメイン優先）
+        try:
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS
+        except ImportError:
+            trusted_domains = ["amazon.co.jp", "hanmoto.com", "books.rakuten.co.jp"]
+
+        # 信頼できるドメインの結果を優先的に選択
+        fetch_targets = []
+        for r in search_results:
+            url = r.get("url", "")
+            if any(domain in url for domain in trusted_domains):
+                fetch_targets.append(r)
+                if len(fetch_targets) >= max_fetch:
+                    break
+
+        # 信頼できるドメインが不足している場合は他の結果も追加
+        if len(fetch_targets) < max_fetch:
+            for r in search_results:
+                if r not in fetch_targets:
+                    fetch_targets.append(r)
+                    if len(fetch_targets) >= max_fetch:
+                        break
+
+        def fetch_content(result: Dict[str, str]) -> Dict[str, Any]:
+            """単一URLのコンテンツを取得"""
+            url = result.get("url", "")
+            try:
+                # 簡易的なHTML取得（タイムアウト10秒）
+                response = requests.get(url, timeout=10, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; BookSummaryBot/1.0)"
+                })
+                if response.status_code == 200:
+                    # HTMLからテキストを抽出（簡易版）
+                    html = response.text
+                    # <p>, <div>, <span> タグ内のテキストを抽出
+                    import re
+                    # scriptとstyleタグを除去
+                    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    # HTMLタグを除去
+                    text = re.sub(r'<[^>]+>', ' ', html)
+                    # 連続する空白を1つに
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    # 最大2000文字に制限
+                    enriched_text = text[:2000] if len(text) > 2000 else text
+
+                    result_copy = result.copy()
+                    result_copy["enriched_content"] = enriched_text
+                    logger.info(f"WebFetch success for {url[:50]}... (fetched {len(enriched_text)} chars)")
+                    return result_copy
+                else:
+                    logger.warning(f"WebFetch failed for {url}: HTTP {response.status_code}")
+                    return result
+            except Exception as e:
+                logger.warning(f"WebFetch failed for {url}: {e}")
+                return result
+
+        # 並列でWebFetch実行
+        with ThreadPoolExecutor(max_workers=min(2, len(fetch_targets))) as executor:
+            futures = {executor.submit(fetch_content, r): r for r in fetch_targets}
+            for future in as_completed(futures):
+                try:
+                    enriched_result = future.result()
+                    enriched_results.append(enriched_result)
+                except Exception as e:
+                    logger.error(f"WebFetch thread error: {e}")
+                    # エラー時は元の結果をそのまま追加
+                    original = futures[future]
+                    enriched_results.append(original)
+
+        # WebFetch対象外の結果も追加
+        for r in search_results:
+            if r not in fetch_targets:
+                enriched_results.append(r)
+
+        return enriched_results
+
+    def summarize_book_with_toc(
+        self,
+        book_title: str,
+        table_of_contents: str,
+        search_results: List[Dict[str, str]],
+        requested_model: str = "",
+        use_webfetch: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        書籍専用要約：目次構造を尊重し、信頼できる出版社情報や書評を優先
+
+        Args:
+            book_title: 書籍タイトル
+            table_of_contents: ユーザーが提供した目次（章立て）
+            search_results: 検索結果（出版社サイト、書評サイトなど）
+            requested_model: 使用するモデル名
+            use_webfetch: WebFetchでコンテンツを取得するか（デフォルトTrue）
+
+        Returns:
+            要約結果を含む辞書
+        """
+        # WebFetchでコンテンツを強化
+        if use_webfetch and search_results:
+            logger.info(f"[Book Summary] Enriching search results with WebFetch (top 2 results)")
+            enriched_results = self._enrich_search_results_with_webfetch(search_results, max_fetch=2)
+        else:
+            enriched_results = search_results
+
+        lines = [
+            f"書籍タイトル: {book_title}",
+            "",
+            "ユーザーが提供した目次:",
+            table_of_contents,
+            "",
+            "参考資料（出版社サイト、書評サイト、大手書店の情報）:",
+        ]
+
+        # 信頼できるソースを優先的にリスト化
+        # app/constants.pyから信頼できるドメインリストを読み込む
+        try:
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS
+        except ImportError:
+            # フォールバック: constants.pyが存在しない場合
+            logger.warning("app.constants not found, using hardcoded trusted domains")
+            trusted_domains = [
+                "amazon.co.jp", "hanmoto.com", "books.rakuten.co.jp",
+                "bookmeter.com", "booklog.jp", "honz.jp"
+            ]
+
+        trusted_sources = []
+        other_sources = []
+
+        for i, r in enumerate(enriched_results, 1):
+            title = r.get("title", "")
+            url = r.get("url", "")
+            snip = r.get("snippet", "")
+            enriched_content = r.get("enriched_content", "")
+
+            # WebFetchで取得したコンテンツがある場合はそれを使用
+            if enriched_content:
+                entry = f"[{i}] {title}\nURL: {url}\n詳細情報: {enriched_content}\n"
+            else:
+                entry = f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n"
+
+            # 信頼できるドメインを優先
+            if any(domain in url for domain in trusted_domains):
+                trusted_sources.append(entry)
+            else:
+                other_sources.append(entry)
+
+        # 信頼できるソースを先に配置
+        for entry in trusted_sources:
+            lines.append(entry)
+        for entry in other_sources:
+            lines.append(entry)
+
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("指示:")
+        lines.append("1. **信頼できる情報源を優先**: Amazon、楽天ブックス、版元ドットコムなどの大手書店・出版社の情報を最優先で参照してください。")
+        lines.append("2. **書籍の全体像を把握**: 参考資料から書籍のテーマ、対象読者、主要なメッセージを理解してください。")
+        lines.append("3. **目次構造に沿った要約**: ユーザーが提供した目次の各章について、以下の優先順位で要約を作成してください:")
+        lines.append("   a. 参考資料に明確に記載されている内容を使用")
+        lines.append("   b. 章タイトルと書籍全体のテーマから、その章で扱われている内容を**合理的に推論**")
+        lines.append("   c. 論語に関する一般的な知識と章タイトルを組み合わせて、**教育的な要約**を提供")
+        lines.append("4. **情報不足への対応**: 具体的な情報がない章でも、以下のように対応してください:")
+        lines.append("   - 「この章では、[章タイトル]について論語の教えを実践的に解説していると推測されます」")
+        lines.append("   - 「書籍全体のテーマから、この章では[推測される内容]について扱っていると考えられます」")
+        lines.append("5. **無関係な資料の除外**: 学術論文、大学パンフレット、無関係なレビューは無視してください。")
+        lines.append("6. **要約の有用性を優先**: 「情報不足」という回答は避け、可能な限り有用な要約を提供してください。")
+        lines.append("7. **参考情報源の明記**: 最後に、実際に参考にした情報源のURLを列挙してください。")
+        lines.append("")
+        lines.append("出力形式:")
+        lines.append("```")
+        lines.append("## 書籍名")
+        lines.append("")
+        lines.append("### 序章/第一章: [章タイトル]")
+        lines.append("[この章の要約]")
+        lines.append("")
+        lines.append("### 第二章: [章タイトル]")
+        lines.append("[この章の要約]")
+        lines.append("")
+        lines.append("...")
+        lines.append("")
+        lines.append("## 参考情報源")
+        lines.append("- [URL1]")
+        lines.append("- [URL2]")
+        lines.append("```")
+
+        prompt = "\n".join(lines)
+
+        text, used = self.chat([], prompt, requested_model=requested_model or self.primary_model)
+        return {"answer": text, "model": used}
+
 
