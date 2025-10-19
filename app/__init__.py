@@ -6,6 +6,8 @@ import re
 import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Any
 
 import markdown as md
 import bleach
@@ -491,8 +493,114 @@ def create_app() -> Flask:
         db.session.add(Message(content=msg, sender="user", conversation_id=cid))
         db.session.commit()
 
-        # 天気／ニュース判定 → 検索優先
+        # 書籍要約判定 → 書籍専用検索パス
+        import re
         q_lower = msg.lower()
+
+        # 書籍要約リクエストの検出
+        book_keywords = ["要約", "まとめ", "内容", "について", "目次", "章"]
+        has_book_request = any(kw in msg for kw in book_keywords) and any(kw in msg for kw in ["本", "書籍", "著書"])
+
+        # 日本語引用符で囲まれた書籍タイトルを検出
+        book_title_match = re.search(r'[「『]([^」』]+)[」』]', msg)
+
+        # 明示的な書籍名パターン（例: "安岡定子 実践・論語塾"）
+        # または引用符内のテキスト
+        if book_title_match or has_book_request:
+            try:
+                sc: SearchClient = current_app.extensions["search_client"]
+                gc: GeminiClient = current_app.extensions["gemini_client"]
+
+                # 書籍タイトルと著者名の抽出
+                author = None
+                if book_title_match:
+                    book_title = book_title_match.group(1).strip()
+                    # 著者名を抽出（"著者名 タイトル"のパターン）
+                    author_title_pattern = r'^([^\s]+(?:\s+[^\s]+)?)\s+(.+)$'
+                    author_match = re.search(author_title_pattern, book_title)
+                    if author_match and len(author_match.group(1)) <= 10:  # 著者名は通常10文字以内
+                        potential_author = author_match.group(1)
+                        potential_title = author_match.group(2)
+                        # 著者名らしい場合のみ分割
+                        if any(c in potential_author for c in ['定子', '太郎', '花子', '一郎']) or \
+                           potential_author.count(' ') == 0:
+                            author = potential_author
+                            book_title = potential_title
+                else:
+                    # キーワードから書籍タイトルを推測
+                    # "について" の前の部分を書籍タイトルとして扱う
+                    title_pattern = r'(.+?)(?:について|の本|の書籍|を要約|のまとめ)'
+                    title_match = re.search(title_pattern, msg)
+                    if title_match:
+                        full_text = title_match.group(1).strip()
+                        # 不要な接頭辞を削除
+                        full_text = re.sub(r'^(次の|以下の|この)?(本|書籍|著書)?[:：]?\s*', '', full_text)
+
+                        # 著者名とタイトルを分割（"著者名 タイトル"のパターン）
+                        parts = full_text.split(None, 1)  # 最初の空白で分割
+                        if len(parts) == 2 and len(parts[0]) <= 10:
+                            author = parts[0]
+                            book_title = parts[1]
+                        else:
+                            book_title = full_text
+                    else:
+                        # フォールバック: メッセージ全体から書籍名を抽出できない場合は通常パスへ
+                        raise ValueError("書籍タイトルを抽出できませんでした")
+
+                # 目次が含まれているかチェック
+                toc_pattern = r'(序章|第[一二三四五六七八九十\d]+章|終章|第\d+章)'
+                has_toc = bool(re.search(toc_pattern, msg))
+
+                if has_toc:
+                    # 目次部分を抽出
+                    toc_lines = [line.strip() for line in msg.split('\n') if re.search(toc_pattern, line)]
+                    table_of_contents = '\n'.join(toc_lines)
+                else:
+                    table_of_contents = "（目次情報なし）"
+
+                # 書籍専用検索を実行（著者名も渡す）
+                logger.info(f"Book search request detected: title='{book_title}', author='{author}'")
+                results = sc.search_book_v2(book_title, author=author, top_k=10)
+
+                if not results:
+                    # 検索結果が0件の場合
+                    reply = f"申し訳ございません。書籍「{book_title}」に関する信頼できる情報源が見つかりませんでした。書籍名を確認の上、再度お試しください。"
+                    db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                    db.session.commit()
+                else:
+                    # 書籍専用要約を実行
+                    if has_toc and table_of_contents:
+                        summary = gc.summarize_book_with_toc(
+                            book_title,
+                            table_of_contents,
+                            results,
+                            (data.get("model") or "").strip()
+                        )
+                    else:
+                        # 目次がない場合は通常の要約
+                        query_for_summary = f"書籍「{book_title}」の内容を要約してください。出版社や書評サイトの情報を優先してください。"
+                        summary = gc.summarize_with_citations(query_for_summary, results, (data.get("model") or "").strip())
+
+                    reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "要約を生成できませんでした。"
+                    db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                    db.session.commit()
+
+                # バックグラウンドタスクでサマリー・タイトル生成
+                q = current_app.extensions.get("rq_queue")
+                if q:
+                    q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
+                else:
+                    _generate_summary_sync(cid)
+
+                return jsonify({
+                    "ok": True, "reply": reply,
+                    "reply_html": render_markdown_safe(reply),
+                    "conversation_id": cid
+                })
+            except Exception as e:
+                logger.warning(f"Book search path failed, fallback to normal chat. reason={e}")
+
+        # 天気／ニュース判定 → 検索優先
         is_weather = any(w in msg for w in ["天気", "天候", "予報"]) or "weather" in q_lower or "forecast" in q_lower
         is_news = any(w in msg for w in ["ニュース", "速報"]) or "news" in q_lower or "headline" in q_lower
 
@@ -600,35 +708,114 @@ def create_app() -> Flask:
         gc: GeminiClient = current_app.extensions["gemini_client"]
 
         try:
-            # クエリタイプを判定
-            date_keywords = ["日付", "今日", "date", "today"]
-            time_sensitive_keywords = ["天気", "天候", "予報", "ニュース", "速報", "weather", "forecast", "news"]
+            # クエリタイプを判定（優先順位: 時間依存 > 時間非依存 > 日付クエリ）
+            q_lower = query.lower()
 
-            is_date_query = any(kw in query.lower() for kw in date_keywords)
-            is_time_sensitive = any(kw in query.lower() for kw in time_sensitive_keywords)
+            # 時間依存クエリ: 最新情報が必要（最優先）
+            time_sensitive_keywords = ["天気", "天候", "予報", "ニュース", "速報", "最新", "weather", "forecast", "news", "latest"]
+            is_time_sensitive = any(kw in q_lower for kw in time_sensitive_keywords)
 
-            # 検索クエリの構築
-            search_query = query if is_date_query else f"{query} {jp_full}"
+            # 時間非依存クエリ: 本、歴史、概念、定義など
+            timeless_keywords = ["本", "書籍", "著者", "book", "歴史", "history", "とは", "意味", "定義", "definition",
+                               "方法", "how to", "やり方", "概要", "要約", "summary", "解説", "explanation"]
+            is_timeless = any(kw in q_lower for kw in timeless_keywords) and not is_time_sensitive
+
+            # 日付クエリ: 今日の日付を聞いている（他に該当しない場合のみ）
+            date_keywords = ["日付", "何日"]
+            is_date_query = any(kw in q_lower for kw in date_keywords) and not is_time_sensitive and not is_timeless
 
             # 鮮度フィルタを動的に設定
             if is_time_sensitive:
                 recency = 1  # 天気・ニュース: 過去1日
+            elif is_timeless:
+                recency = None  # 時間非依存: フィルタなし
             else:
                 recency = 7  # その他: 過去7日
 
-            results = sc.search(search_query, top_k=int(data.get("top_k") or 10), recency_days=recency)
+            # 検索の実行（本の場合は複数クエリで検索）
+            results = []
+            if is_timeless and any(kw in q_lower for kw in ["本", "書籍", "book"]):
+                # 書籍名を抽出（「の本」「の書籍」などを削除）
+                book_name = query
+                for suffix in ["の本の情報を要約して", "の本を要約して", "の書籍を要約して", "の要約", "について", "の情報"]:
+                    book_name = book_name.replace(suffix, "")
+                book_name = book_name.strip()
+
+                # 本の情報検索: 複数のクエリで検索し、結果をマージ
+                book_queries = [
+                    f'"{book_name}"',  # 完全一致検索
+                    f"{book_name} 書評",
+                    f"{book_name} 内容 目次",
+                    f"{book_name} レビュー 感想",
+                    f"{book_name} 著者",
+                ]
+
+                seen_urls = set()
+                for bq in book_queries:
+                    try:
+                        partial = sc.search(bq, top_k=5, recency_days=recency)
+                        for item in partial:
+                            url = item.get("url", "")
+                            if url and url not in seen_urls:
+                                seen_urls.add(url)
+                                results.append(item)
+                                if len(results) >= 15:  # 最大15件
+                                    break
+                    except Exception as e:
+                        logger.warning(f"Book search query failed: {bq}, error: {e}")
+                        continue
+                    if len(results) >= 15:
+                        break
+            elif is_date_query:
+                results = sc.search(query, top_k=5, recency_days=recency)
+            else:
+                # 通常の検索
+                search_query = query if (is_date_query or is_timeless) else f"{query} {jp_full}"
+                top_k = int(data.get("top_k") or 10)
+                results = sc.search(search_query, top_k=top_k, recency_days=recency)
         except SearchError as e:
             error_msg = f"検索エラー: {str(e)}"
             db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
             db.session.commit()
             return jsonify({"ok": False, "error": str(e)}), 502
 
+        # 検索結果が少ない場合の警告
+        if len(results) == 0:
+            error_msg = "検索結果が見つかりませんでした。書籍名を正確に入力するか、別の検索方法をお試しください。"
+            db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
+            db.session.commit()
+            return jsonify({"ok": True, "answer": error_msg, "citations": []})
+
+        logger.info(f"Found {len(results)} search results for query: {query}")
+
         try:
-            # 日付クエリの場合は、現在の日付を明示的に伝える
+            # クエリタイプに応じたプロンプトを構築
             if is_date_query:
                 guard = f"今日の日付は {iso1}（{jp_full}、JST）です。ユーザーが「今日の日付」を尋ねている場合、この日付を直接答えてください。"
+            elif is_time_sensitive:
+                guard = f"今日は {iso1}（{jp_full}、JST）です。最新の情報（過去24時間以内）を優先して採用してください。"
+            elif is_timeless:
+                # 本の検索の場合は専用のプロンプト
+                if any(kw in q_lower for kw in ["本", "書籍", "book"]):
+                    guard = (
+                        f"参考日: {iso1}。以下は書籍に関する情報の要約タスクです。\n\n"
+                        f"**検索結果数: {len(results)}件**\n\n"
+                        "**重要な指示:**\n"
+                        "1. 提供された検索結果を徹底的に分析し、書籍に関する情報を可能な限り抽出してください\n"
+                        "2. 書籍のタイトル、著者、出版社、テーマ、概要などの基本情報を特定してください\n"
+                        "3. 書評サイト、レビュー、Amazon、読書メーターなどの情報があれば活用してください\n"
+                        "4. 目次や章立てが分かる場合は、各章の内容を推測も含めて説明してください\n"
+                        "5. 著者の経歴や専門分野から、本の内容や意図を推測してください\n"
+                        "6. 直接的な情報がない部分でも、関連情報から合理的に推測できる内容は含めてください\n"
+                        "7. 検索結果が断片的でも、得られた情報を統合して有用な要約を作成してください\n"
+                        "8. 「不明」とする前に、検索結果から読み取れることを最大限活用してください\n"
+                        "9. 書籍の対象読者層や、どのような場面で役立つかも考察してください\n\n"
+                        "**注意:** 検索結果に直接的な書籍情報がない場合でも、諦めずに関連する情報から推測して回答してください。"
+                    )
+                else:
+                    guard = f"参考日: {iso1}（{jp_full}、JST）。以下は時間に依存しない情報の要約です。検索結果から信頼性の高い情報を総合的に分析してください。"
             else:
-                guard = f"今日は {iso1}（JST）です。今日の情報のみ採用し、過去日付は除外。"
+                guard = f"今日は {iso1}（JST）です。最新の情報を優先してください。"
 
             composed = guard + "\n\nユーザーの要望: " + query
             summary = gc.summarize_with_citations(composed, results, (data.get("model") or "").strip())
