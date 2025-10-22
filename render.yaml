@@ -76,6 +76,56 @@ services:
     plan: free  # または starter
     ipAllowList: []  # 空 = すべてのIPを許可
 
+  # RQ Worker (Deep Research background processing)
+  - type: background_worker
+    name: gemini-chat-worker
+    runtime: python
+    plan: free
+    startCommand: "rq worker -u $REDIS_URL gemini-chat-queue --with-scheduler"
+    envVars:
+      # Python version
+      - key: PYTHON_VERSION
+        value: 3.12
+
+      # Database (PostgreSQL接続は自動設定)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gemini-chat-db
+          property: connectionString
+
+      # Redis (Redis接続は自動設定)
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: gemini-chat-redis
+          property: connectionString
+
+      # Gemini API (これらは手動で設定してください)
+      - key: GEMINI_API_KEY
+        sync: false  # 手動設定が必要
+
+      - key: GOOGLE_API_VERSION
+        value: v1beta
+
+      - key: DEFAULT_GEMINI_MODEL
+        value: gemini-2.5-flash
+
+      - key: FALLBACK_GEMINI_MODEL
+        value: gemini-2.5-pro
+
+      - key: USE_MOCK_GEMINI
+        value: false
+
+      # Search API (これらは手動で設定してください)
+      - key: SEARCH_PROVIDER
+        value: google_cse
+
+      - key: GOOGLE_API_KEY
+        sync: false  # 手動設定が必要
+
+      - key: GOOGLE_CSE_ID
+        sync: false  # 手動設定が必要
+
   # Redis
   - type: redis
     name: gemini-chat-redis
