@@ -56,3 +56,30 @@ class Announcement(db.Model):
     def __repr__(self):
         return f"<Announcement {self.id}>"
 
+
+class ResearchJob(db.Model):
+    """
+    Deep Research ジョブの状態管理
+    """
+    __tablename__ = "research_job"
+    id = db.Column(db.Integer, primary_key=True)
+    task_id = db.Column(db.String(100), unique=True, nullable=False)  # RQジョブID
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    conversation_id = db.Column(db.Integer, db.ForeignKey("conversation.id"), nullable=True)
+    query = db.Column(db.Text, nullable=False)  # 元のクエリ
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending, decomposing, searching, synthesizing, completed, failed
+    phase = db.Column(db.String(20), nullable=True)  # 現在のフェーズ
+    progress_message = db.Column(db.String(200), nullable=True)  # 進捗メッセージ
+    result_report = db.Column(db.Text, nullable=True)  # 最終レポート（Markdown）
+    sub_queries = db.Column(db.Text, nullable=True)  # JSON形式のサブクエリリスト
+    sources_count = db.Column(db.Integer, nullable=True)  # 収集したソース数
+    error_message = db.Column(db.Text, nullable=True)  # エラーメッセージ
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref=db.backref("research_jobs", lazy=True))
+    conversation = db.relationship("Conversation", backref=db.backref("research_jobs", lazy=True))
+
+    def __repr__(self):
+        return f"<ResearchJob {self.task_id} status={self.status}>"
+

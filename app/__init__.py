@@ -3,6 +3,7 @@ load_dotenv()
 # app/__init__.py
 import os
 import re
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -26,7 +27,7 @@ from flask_talisman import Talisman
 from flask_migrate import Migrate
 from flask_bcrypt import Bcrypt
 
-from .models import db, User, Conversation, Message, Announcement
+from .models import db, User, Conversation, Message, Announcement, ResearchJob
 
 logger = logging.getLogger("gemini_chat_app")
 
@@ -94,6 +95,27 @@ def clean_and_shorten_title(text: str, max_length: int = 18) -> str:
     if len(title) > max_length:
         title = title[:max_length - 1] + "…"
     return title.strip() or "会話"
+
+
+# ===============================
+# Helper: Summarizer selection
+# ===============================
+from typing import List, Dict, Any
+
+
+def _summarize_with_citations(gc, query: str, results: List[Dict[str, Any]], requested_model: str = "") -> Dict[str, Any]:
+    """Prefer enriched summarizer if available, fallback to default.
+
+    This allows HTTP client to use enriched_content-aware prompt without
+    changing the Python client which already handles enrichment internally.
+    """
+    try:
+        if hasattr(gc, "summarize_with_citations_enriched"):
+            return gc.summarize_with_citations_enriched(query, results, requested_model)
+        return gc.summarize_with_citations(query, results, requested_model)
+    except Exception:
+        # Last resort: fall back to default method
+        return gc.summarize_with_citations(query, results, requested_model)
 
 
 # ===============================
@@ -221,7 +243,7 @@ def create_app() -> Flask:
         api_key=os.getenv("GEMINI_API_KEY"),
     )
     app.extensions["search_client"] = SearchClient(
-        provider=os.getenv("SEARCH_PROVIDER", "google_cse"),
+        provider=os.getenv("SEARCH_PROVIDER", "serpapi"),  # "google_cse" から "serpapi" に変更
         env=os.environ
     )
 
@@ -265,24 +287,11 @@ def create_app() -> Flask:
 
             if new_summary:
                 conv.summary = new_summary
-
-                sidebar_prompt = f"""
-以下の会話要約をもとに、サイドバーで一覧表示するための「短いタイトル」を日本語で作成してください。
-- 12〜18文字以内
-- 名詞句（文にしない／句点不要）
-- 出力は1行のみ
-要約:
-{new_summary}
-"""
-                short_title, _ = gc.chat([], sidebar_prompt)
-                short_title = (short_title or "").strip().splitlines()[0]
-                if not short_title:
-                    short_title = (new_summary[:18] or "会話").strip()
-
-                conv.title = short_title
+                # タイトルは自動生成しない（要約をサイドバーに表示するため）
+                # ユーザーが手動でタイトルを設定することは可能
                 conv.updated_at = datetime.utcnow()
                 db.session.commit()
-                logger.info(f"✅ Generated summary/title for conversation {conversation_id}")
+                logger.info(f"✅ Generated summary for conversation {conversation_id}")
         except Exception as e:
             logger.warning(f"Summary generation failed: {e}")
 
@@ -319,16 +328,91 @@ def create_app() -> Flask:
     @login_required
     def admin_dashboard():
         _admin_required()
-        users = User.query.order_by(User.id.asc()).all()
-        conversations = Conversation.query.order_by(
+        # Get users with conversation and message counts
+        from sqlalchemy import func
+        users = db.session.query(
+            User,
+            func.count(Conversation.id.distinct()).label('conversation_count'),
+            func.count(Message.id).label('message_count')
+        ).outerjoin(Conversation, User.id == Conversation.user_id)\
+         .outerjoin(Message, Conversation.id == Message.conversation_id)\
+         .group_by(User.id)\
+         .order_by(User.id.asc())\
+         .all()
+
+        # Unpack query results
+        users_with_stats = []
+        for user, conv_count, msg_count in users:
+            user.conversation_count = conv_count
+            user.message_count = msg_count
+            users_with_stats.append(user)
+
+        conversations = db.session.query(Conversation).order_by(
             Conversation.is_pinned.desc(), Conversation.id.desc()
         ).limit(100).all()
-        announcements = Announcement.query.order_by(
+        announcements = db.session.query(Announcement).order_by(
             Announcement.timestamp.desc().nullslast()
         ).all()
         return render_template(
             "admin_dashboard.html",
-            users=users, conversations=conversations, announcements=announcements
+            users=users_with_stats, conversations=conversations, announcements=announcements
+        )
+
+    @bp.route("/admin/user/<int:user_id>")
+    @login_required
+    def user_detail(user_id: int):
+        _admin_required()
+        user = db.session.get(User, user_id)
+        if not user:
+            abort(404)
+
+        # Get user statistics
+        from sqlalchemy import func
+        total_conversations = db.session.query(func.count(Conversation.id))\
+            .filter(Conversation.user_id == user_id).scalar()
+        total_messages = db.session.query(func.count(Message.id))\
+            .join(Conversation, Message.conversation_id == Conversation.id)\
+            .filter(Conversation.user_id == user_id).scalar()
+        pinned_conversations = db.session.query(func.count(Conversation.id))\
+            .filter(Conversation.user_id == user_id, Conversation.is_pinned == True).scalar()
+        deep_research_jobs = db.session.query(func.count(ResearchJob.id))\
+            .filter(ResearchJob.user_id == user_id).scalar()
+
+        stats = {
+            'total_conversations': total_conversations or 0,
+            'total_messages': total_messages or 0,
+            'pinned_conversations': pinned_conversations or 0,
+            'deep_research_jobs': deep_research_jobs or 0
+        }
+
+        # Get recent conversations with message counts
+        conversations = db.session.query(
+            Conversation,
+            func.count(Message.id).label('message_count')
+        ).outerjoin(Message, Conversation.id == Message.conversation_id)\
+         .filter(Conversation.user_id == user_id)\
+         .group_by(Conversation.id)\
+         .order_by(Conversation.updated_at.desc())\
+         .limit(10).all()
+
+        # Unpack and add message_count to conversations
+        conversations_with_count = []
+        for conv, msg_count in conversations:
+            conv.message_count = msg_count
+            conversations_with_count.append(conv)
+
+        # Get recent research jobs
+        research_jobs = db.session.query(ResearchJob)\
+            .filter(ResearchJob.user_id == user_id)\
+            .order_by(ResearchJob.id.desc())\
+            .limit(10).all()
+
+        return render_template(
+            "user_detail.html",
+            user=user,
+            stats=stats,
+            conversations=conversations_with_count,
+            research_jobs=research_jobs
         )
 
     @bp.route("/admin/announcement/add", methods=["POST"])
@@ -342,6 +426,29 @@ def create_app() -> Flask:
         a = Announcement(message=msg, is_active=is_active, timestamp=datetime.utcnow())
         db.session.add(a)
         db.session.commit()
+
+        # ユーザー提供資料（DeepResearch など）を取り込む
+        user_sources_raw = data.get("user_sources") or []
+        user_sources: List[Dict[str, Any]] = []
+        try:
+            for src in user_sources_raw:
+                if not isinstance(src, dict):
+                    continue
+                title = (src.get("title") or "ユーザー提供資料").strip()
+                content = (src.get("content") or "").strip()
+                chapter = (src.get("chapter") or "").strip()
+                if not content:
+                    continue
+                user_sources.append({
+                    "title": title,
+                    "url": src.get("url") or f"user:{title}",
+                    "snippet": content[:500],
+                    "enriched_content": content,
+                    "source": "user",
+                    "chapter": chapter,
+                })
+        except Exception:
+            user_sources = []
         return redirect(url_for("core.admin_dashboard"))
 
     @bp.route("/admin/announcement/<int:ann_id>/toggle", methods=["POST"])
@@ -561,6 +668,20 @@ def create_app() -> Flask:
                 # 書籍専用検索を実行（著者名も渡す）
                 logger.info(f"Book search request detected: title='{book_title}', author='{author}'")
                 results = sc.search_book_v2(book_title, author=author, top_k=10)
+                # ユーザー提供資料があれば先頭にマージ（簡易重複排除）
+                try:
+                    if user_sources:
+                        seen = set((r.get("url") or r.get("link") or r.get("info_link") or "") for r in results)
+                        merged = []
+                        for r in user_sources:
+                            u = r.get("url") or ""
+                            if u not in seen:
+                                merged.append(r)
+                                seen.add(u)
+                        merged.extend(results)
+                        results = merged
+                except Exception:
+                    pass
 
                 if not results:
                     # 検索結果が0件の場合
@@ -579,7 +700,7 @@ def create_app() -> Flask:
                     else:
                         # 目次がない場合は通常の要約
                         query_for_summary = f"書籍「{book_title}」の内容を要約してください。出版社や書評サイトの情報を優先してください。"
-                        summary = gc.summarize_with_citations(query_for_summary, results, (data.get("model") or "").strip())
+                        summary = _summarize_with_citations(gc, query_for_summary, results, (data.get("model") or "").strip())
 
                     reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "要約を生成できませんでした。"
                     db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
@@ -597,8 +718,19 @@ def create_app() -> Flask:
                     "reply_html": render_markdown_safe(reply),
                     "conversation_id": cid
                 })
+            except SearchError as e:
+                logger.error(f"Book search path failed due to SearchError: {e}")
+                reply = f"書籍検索に失敗しました。検索サービスの設定（APIキーなど）を確認してください。エラー: {e}"
+                db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                db.session.commit()
+                return jsonify({"ok": True, "reply": reply, "reply_html": render_markdown_safe(reply), "conversation_id": cid})
             except Exception as e:
-                logger.warning(f"Book search path failed, fallback to normal chat. reason={e}")
+                logger.error(f"Book search path failed unexpectedly: {e}")
+                # 予期せぬエラーでもフォールバックせず、エラーを通知する
+                reply = f"書籍検索中に予期せぬエラーが発生しました: {e}"
+                db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                db.session.commit()
+                return jsonify({"ok": True, "reply": reply, "reply_html": render_markdown_safe(reply), "conversation_id": cid})
 
         # 天気／ニュース判定 → 検索優先
         is_weather = any(w in msg for w in ["天気", "天候", "予報"]) or "weather" in q_lower or "forecast" in q_lower
@@ -621,10 +753,24 @@ def create_app() -> Flask:
                 )
                 query1 = f"{msg} {jp_full} {site_bias}"
                 results = sc.search(query1, top_k=10, recency_days=1)
+                # ユーザー提供資料をマージ（任意）
+                try:
+                    if user_sources:
+                        seen = set((r.get("url") or r.get("link") or r.get("info_link") or "") for r in results)
+                        merged = []
+                        for r in user_sources:
+                            u = r.get("url") or ""
+                            if u not in seen:
+                                merged.append(r)
+                                seen.add(u)
+                        merged.extend(results)
+                        results = merged
+                except Exception:
+                    pass
 
                 guard = f"今日は {iso1}（JST）です。今日の情報のみ採用してください。過去日付は除外。"
                 composed = guard + "\n\nユーザー入力: " + msg
-                summary = gc.summarize_with_citations(composed, results, (data.get("model") or "").strip())
+                summary = _summarize_with_citations(gc, composed, results, (data.get("model") or "").strip())
 
                 reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "情報を取得できませんでした。"
                 db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
@@ -643,8 +789,18 @@ def create_app() -> Flask:
                     "reply_html": render_markdown_safe(reply),
                     "conversation_id": cid
                 })
+            except SearchError as e:
+                logger.error(f"News/Weather search path failed due to SearchError: {e}")
+                reply = f"ニュース・天気検索に失敗しました。検索サービスの設定（APIキーなど）を確認してください。エラー: {e}"
+                db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                db.session.commit()
+                return jsonify({"ok": True, "reply": reply, "reply_html": render_markdown_safe(reply), "conversation_id": cid})
             except Exception as e:
-                logger.warning(f"Search path failed, fallback to normal chat. reason={e}")
+                logger.error(f"News/Weather search path failed unexpectedly: {e}")
+                reply = f"ニュース・天気検索中に予期せぬエラーが発生しました: {e}"
+                db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
+                db.session.commit()
+                return jsonify({"ok": True, "reply": reply, "reply_html": render_markdown_safe(reply), "conversation_id": cid})
 
         # 通常チャット
         gc: GeminiClient = current_app.extensions["gemini_client"]
@@ -658,13 +814,8 @@ def create_app() -> Flask:
         db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
         db.session.commit()
 
-        # バックグラウンドタスクでサマリー・タイトル生成（Redisがなければ同期実行）
-        q = current_app.extensions.get("rq_queue")
-        if q:
-            q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
-        else:
-            # Redisがない場合は同期的に生成
-            _generate_summary_sync(cid)
+        # 同期的に要約を生成
+        _generate_summary_sync(cid)
 
         return jsonify({
             "ok": True,
@@ -709,6 +860,29 @@ def create_app() -> Flask:
 
         try:
             # クエリタイプを判定（優先順位: 時間依存 > 時間非依存 > 日付クエリ）
+            # ユーザー提供資料（DeepResearch など）
+            user_sources_raw = data.get("user_sources") or []
+            user_sources: List[Dict[str, Any]] = []
+            try:
+                for src in user_sources_raw:
+                    if not isinstance(src, dict):
+                        continue
+                    title = (src.get("title") or "ユーザー提供資料").strip()
+                    content = (src.get("content") or "").strip()
+                    chapter = (src.get("chapter") or "").strip()
+                    if not content:
+                        continue
+                    user_sources.append({
+                        "title": title,
+                        "url": src.get("url") or f"user:{title}",
+                        "snippet": content[:500],
+                        "enriched_content": content,
+                        "source": "user",
+                        "chapter": chapter,
+                    })
+            except Exception:
+                user_sources = []
+
             q_lower = query.lower()
 
             # 時間依存クエリ: 最新情報が必要（最優先）
@@ -773,11 +947,27 @@ def create_app() -> Flask:
                 search_query = query if (is_date_query or is_timeless) else f"{query} {jp_full}"
                 top_k = int(data.get("top_k") or 10)
                 results = sc.search(search_query, top_k=top_k, recency_days=recency)
+
+            # ユーザー提供資料があれば先頭にマージ
+            try:
+                if 'user_sources' in locals() and user_sources:
+                    seen = set((r.get("url") or r.get("link") or r.get("info_link") or "") for r in results)
+                    merged = []
+                    for r in user_sources:
+                        u = r.get("url") or ""
+                        if u not in seen:
+                            merged.append(r)
+                            seen.add(u)
+                    merged.extend(results)
+                    results = merged
+            except Exception:
+                pass
         except SearchError as e:
-            error_msg = f"検索エラー: {str(e)}"
-            db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
+            logger.error(f"Search/Summarize path failed due to SearchError: {e}")
+            reply = f"Web検索に失敗しました。検索サービスの設定（APIキーなど）を確認してください。エラー: {e}"
+            db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
             db.session.commit()
-            return jsonify({"ok": False, "error": str(e)}), 502
+            return jsonify({"ok": True, "answer": reply, "citations": []})
 
         # 検索結果が少ない場合の警告
         if len(results) == 0:
@@ -818,27 +1008,23 @@ def create_app() -> Flask:
                 guard = f"今日は {iso1}（JST）です。最新の情報を優先してください。"
 
             composed = guard + "\n\nユーザーの要望: " + query
-            summary = gc.summarize_with_citations(composed, results, (data.get("model") or "").strip())
+            summary = _summarize_with_citations(gc, composed, results, (data.get("model") or "").strip())
 
             # アシスタントの応答を保存
             reply = summary.get("answer") or summary.get("summary") or summary.get("text") or "情報を取得できませんでした。"
             db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
             db.session.commit()
 
-            # バックグラウンドタスクでサマリーとタイトルを生成（Redisがなければ同期実行）
-            q = current_app.extensions.get("rq_queue")
-            if q:
-                q.enqueue("services.tasks.generate_summary_and_title", cid, job_timeout=180)
-            else:
-                # Redisがない場合は同期的に生成
-                _generate_summary_sync(cid)
+            # 同期的に要約を生成
+            _generate_summary_sync(cid)
 
             return jsonify({"ok": True, "conversation_id": cid, **summary})
         except GeminiFallbackError as e:
-            error_msg = f"サマリー生成エラー: {str(e)}"
-            db.session.add(Message(content=error_msg, sender="assistant", conversation_id=cid))
+            logger.error(f"Search/Summarize path failed due to GeminiFallbackError: {e}")
+            reply = f"検索結果の要約生成に失敗しました。モデルのレート制限や設定を確認してください。エラー: {e}"
+            db.session.add(Message(content=reply, sender="assistant", conversation_id=cid))
             db.session.commit()
-            return jsonify({"ok": False, "error": "summarization failed", "details": str(e)}), 502
+            return jsonify({"ok": True, "answer": reply, "citations": []})
 
     # ----------------- Export -----------------
     @bp.route("/api/export/<int:cid>")
@@ -855,6 +1041,146 @@ def create_app() -> Flask:
             "title": conv.title,
             "created_at": getattr(conv, "created_at", None).isoformat() if getattr(conv, "created_at", None) else "",
             "messages": [{"role": m.sender, "content": m.content} for m in messages]
+        })
+
+    # ----------------- Deep Research API -----------------
+    @bp.route("/api/deep_research", methods=["POST"])
+    @login_required
+    @limiter.limit("100 per hour")  # Testing: Temporarily increased for development (TODO: restore to 5 per hour in production)
+    def create_deep_research():
+        """
+        Create a new Deep Research job.
+        Request: {query: str, conversation_id?: int}
+        Response: {ok: true, job_id: int, status: str} or {ok: false, error: str}
+        """
+        data = request.get_json()
+        query = data.get("query", "").strip()
+        conversation_id = data.get("conversation_id")
+
+        if not query:
+            return jsonify({"ok": False, "error": "Query is required"}), 400
+
+        # Check if Redis/RQ is available
+        rq_queue = current_app.extensions.get("rq_queue")
+        if rq_queue is None:
+            return jsonify({
+                "ok": False,
+                "error": "Deep Research service is temporarily unavailable (background queue not available)"
+            }), 503
+
+        # Verify conversation ownership if conversation_id provided
+        if conversation_id:
+            conv = db.session.get(Conversation, conversation_id)
+            if not conv or conv.user_id != current_user.id:
+                return jsonify({"ok": False, "error": "Invalid conversation"}), 403
+
+        try:
+            # Import task function
+            from services.tasks import execute_deep_research
+
+            # Create ResearchJob record
+            import uuid
+            task_id = str(uuid.uuid4())
+
+            job = ResearchJob(
+                task_id=task_id,
+                user_id=current_user.id,
+                conversation_id=conversation_id,
+                query=query,
+                status="pending",
+                phase="initializing",
+                progress_message="研究ジョブを初期化中..."
+            )
+            db.session.add(job)
+            db.session.flush()  # Flush to get job.id without committing
+
+            # Enqueue RQ task (if this fails, rollback will happen in except block)
+            rq_job = rq_queue.enqueue(
+                execute_deep_research,
+                job.id,
+                job_timeout="20m"  # 20 minutes timeout (increased from 10m)
+            )
+
+            # Only commit after successful enqueue
+            db.session.commit()
+
+            logger.info(f"[DeepResearch] Created job {job.id} for user {current_user.id}, RQ job {rq_job.id}")
+
+            return jsonify({
+                "ok": True,
+                "job_id": job.id,
+                "status": job.status,
+                "message": "Deep Research job created successfully"
+            }), 201
+
+        except Exception as e:
+            db.session.rollback()
+            logger.exception(f"[DeepResearch] Failed to create job: {e}")
+            # Return generic error to prevent leaking internal details
+            return jsonify({"ok": False, "error": "An unexpected error occurred while creating the research job."}), 500
+
+    @bp.route("/api/deep_research/status/<int:job_id>", methods=["GET"])
+    @login_required
+    def get_deep_research_status(job_id: int):
+        """
+        Get status of a Deep Research job.
+        Response: {ok: true, job_id, status, phase, progress_message, sources_count, sub_queries}
+        """
+        job = db.session.get(ResearchJob, job_id)
+
+        # Ownership check (critical security requirement)
+        if not job or job.user_id != current_user.id:
+            abort(404)  # Use 404 to avoid leaking info about existing jobs
+
+        response = jsonify({
+            "ok": True,
+            "job_id": job.id,
+            "status": job.status,
+            "phase": job.phase,
+            "progress_message": job.progress_message,
+            "sources_count": job.sources_count,
+            "sub_queries": json.loads(job.sub_queries) if job.sub_queries else [],
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "error": job.error_message if job.status == "failed" else None
+        })
+        # Prevent caching of polling responses
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        return response
+
+    @bp.route("/api/deep_research/result/<int:job_id>", methods=["GET"])
+    @login_required
+    def get_deep_research_result(job_id: int):
+        """
+        Get result of a completed Deep Research job.
+        Response: {ok: true, job_id, status, result_report, ...} or error if not completed
+        """
+        job = db.session.get(ResearchJob, job_id)
+
+        # Ownership check (critical security requirement)
+        if not job or job.user_id != current_user.id:
+            abort(404)  # Use 404 to avoid leaking info about existing jobs
+
+        # State validation: only return result if completed
+        if job.status != "completed":
+            return jsonify({
+                "ok": False,
+                "error": f"Job is not completed yet (current status: {job.status})",
+                "status": job.status,
+                "phase": job.phase,
+                "progress_message": job.progress_message
+            }), 400
+
+        return jsonify({
+            "ok": True,
+            "job_id": job.id,
+            "status": job.status,
+            "query": job.query,
+            "result_report": job.result_report,
+            "sources_count": job.sources_count,
+            "sub_queries": json.loads(job.sub_queries) if job.sub_queries else [],
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None
         })
 
     # ----------------- Error Handlers -----------------

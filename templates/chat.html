@@ -142,6 +142,48 @@
       to { transform: rotate(360deg); }
     }
 
+    /* ===== Deep Research Progress ===== */
+    .deep-research-progress {
+      background: #0f1721;
+      border: 1px solid #1e3a5f;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .progress-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .status-badge {
+      background: #2f7dff;
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .status-badge.completed { background: #1e824c; }
+    .status-badge.failed { background: #d93025; }
+    .progress-phase {
+      font-size: 13px;
+      color: #9fc3ff;
+      margin-bottom: 4px;
+    }
+    .progress-message {
+      font-size: 12px;
+      color: #9aa0a6;
+      margin-bottom: 6px;
+    }
+    .progress-queries {
+      font-size: 11px;
+      color: #7a8186;
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px dashed #2a3950;
+    }
+
     /* ===== Footer ===== */
     .footer { display:flex; align-items:center; justify-content:space-between; padding:8px 14px; border-top:1px solid #2a2d31; background:#15171a; position:relative; z-index:1; font-size:12px; }
     a.link { color:#9fc3ff; text-decoration:none; }
@@ -196,18 +238,33 @@
     <div class="content">
       <div class="container">
         <div id="summary" class="muted" style="margin:6px 0 10px;"></div>
+
+        <!-- Deep Research Progress Indicator -->
+        <div id="deep-research-progress" class="deep-research-progress" style="display:none;">
+          <div class="progress-header">
+            <strong>🔬 Deep Research</strong>
+            <span id="research-status" class="status-badge">進行中</span>
+          </div>
+          <div id="research-phase" class="progress-phase">初期化中...</div>
+          <div id="research-message" class="progress-message"></div>
+          <div id="research-queries" class="progress-queries"></div>
+        </div>
+
         <div class="messages" id="messages" aria-live="polite"></div>
 
         <div class="composer">
-          <textarea id="input" placeholder="メッセージを入力…（Shift+Enterで改行 / Enterで送信）" rows="3"></textarea>
+          <textarea id="input" placeholder="メッセージを入力…（Enterで改行 / Shift+Enterで送信）" rows="3"></textarea>
           <div class="send-col">
             <button id="send" type="button">送信</button>
             <label class="inline-switch">
               <input type="checkbox" id="websearch-enabled" /> Web検索を使う
             </label>
+            <label class="inline-switch">
+              <input type="checkbox" id="deepresearch-enabled" /> Deep Research
+            </label>
           </div>
         </div>
-        <div class="hint">Shift+Enterで改行・Enterで送信</div>
+        <div class="hint">Enterで改行・Shift+Enterで送信</div>
       </div>
     </div>
 
@@ -240,7 +297,7 @@
   })();
 </script>
 
-<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+<script src="{{ url_for('static', filename='js/chat.js') }}?v=1.5"></script>
 </body>
 </html>
 
