@@ -70,3 +70,8 @@ htmlcov/
 
 # Render specific
 .render/
+
+# Debugging and local config files
+debug_search.py
+test_book_search.py
+.claude/
