@@ -1106,6 +1106,12 @@ def create_app() -> Flask:
             db.session.add(job)
             db.session.flush()  # Flush to get job.id without committing
 
+            # Verify job.id was generated
+            if not job.id:
+                db.session.rollback()
+                logger.error("[DeepResearch] Failed to generate job ID after flush")
+                return jsonify({"ok": False, "error": "Failed to create research job"}), 500
+
             # Enqueue RQ task (if this fails, rollback will happen in except block)
             rq_job = rq_queue.enqueue(
                 execute_deep_research,
@@ -1115,7 +1121,6 @@ def create_app() -> Flask:
 
             # Only commit after successful enqueue
             db.session.commit()
-
             logger.info(f"[DeepResearch] Created job {job.id} for user {current_user.id}, RQ job {rq_job.id}")
 
             return jsonify({
