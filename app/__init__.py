@@ -212,17 +212,35 @@ def create_app() -> Flask:
     limiter = Limiter(
         key_func=get_remote_address,
         default_limits=["100/minute"],
-        storage_uri="memory://",  # ← 常にメモリ使用に変更（Redis不要）
+        storage_uri="memory://",  # ← 常にメモリ使用（Redis不依存）
     )
     limiter.init_app(app)
     logger.info("Flask-Limiter initialized with memory storage (Redis independent)")
 
-    # RQ（Redisキュー）: RedisがOKのときだけ有効化
-    if redis_ok:
+    # RQ（Redisキュー）: Redis接続を独立して確認
+    # Flask-Limiter と RQ の Redis 依存を分離
+    redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
+    redis_ok = False
+    if redis_url:
         try:
             # Render での遅延初期化に対応: 5秒のタイムアウト
+            redis_test_conn = redis_lib.from_url(
+                redis_url,
+                socket_connect_timeout=5,
+                socket_timeout=5
+            )
+            redis_test_conn.ping()  # Redis接続確認
+            redis_ok = True
+            logger.info("Redis is available for RQ queue")
+        except Exception as e:
+            logger.warning(f"Redis connection check failed for RQ: {e}")
+            redis_ok = False
+
+    # RQ キューの初期化（Redis が利用可能な場合のみ）
+    if redis_ok:
+        try:
             rq_conn = redis_lib.from_url(
-                os.getenv("REDIS_URL") or os.getenv("VALKEY_URL"),
+                redis_url,
                 socket_connect_timeout=5,
                 socket_timeout=5
             )
@@ -233,6 +251,7 @@ def create_app() -> Flask:
             logger.warning(f"RQ init failed -> disable queue. reason={e}")
             app.extensions["rq_queue"] = None
     else:
+        logger.warning("RQ queue disabled (Redis not available)")
         app.extensions["rq_queue"] = None
 
     # DB + Migrate
