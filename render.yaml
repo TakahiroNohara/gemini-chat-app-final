@@ -139,3 +139,4 @@ services:
     name: gemini-chat-redis
     plan: free  # または starter
     ipAllowList: []  # 空 = すべてのIPを許可
+    maxmemoryPolicy: allkeys-lru  # メモリ制限に達したとき、最後にアクセスされたキーを削除

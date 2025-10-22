@@ -25,6 +25,13 @@ def main():
         logger.error("REDIS_URL or VALKEY_URL environment variable not set")
         sys.exit(1)
 
+    # Redis URL が valid な形式かチェック
+    if not (redis_url.startswith("redis://") or redis_url.startswith("rediss://") or redis_url.startswith("unix://")):
+        logger.error(f"❌ Invalid REDIS_URL format: {redis_url[:50]}...")
+        logger.error("REDIS_URL must start with redis://, rediss://, or unix://")
+        logger.error(f"Full URL: {redis_url}")
+        sys.exit(1)
+
     logger.info(f"Connecting to Redis: {redis_url[:50]}...")
 
     try:
@@ -39,6 +46,7 @@ def main():
         logger.info("✅ Redis connection established")
     except Exception as e:
         logger.error(f"❌ Failed to connect to Redis: {e}")
+        logger.error(f"REDIS_URL was: {redis_url[:50]}...")
         sys.exit(1)
 
     # RQ Queue を作成
