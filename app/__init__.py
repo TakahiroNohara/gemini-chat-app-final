@@ -1144,6 +1144,13 @@ def create_app() -> Flask:
         if not job or job.user_id != current_user.id:
             abort(404)  # Use 404 to avoid leaking info about existing jobs
 
+        # Safe JSON parsing for sub_queries
+        try:
+            sub_queries = json.loads(job.sub_queries) if job.sub_queries else []
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"Failed to parse sub_queries for job {job_id}: {job.sub_queries}")
+            sub_queries = []
+
         response = jsonify({
             "ok": True,
             "job_id": job.id,
@@ -1151,7 +1158,7 @@ def create_app() -> Flask:
             "phase": job.phase,
             "progress_message": job.progress_message,
             "sources_count": job.sources_count,
-            "sub_queries": json.loads(job.sub_queries) if job.sub_queries else [],
+            "sub_queries": sub_queries,
             "created_at": job.created_at.isoformat() if job.created_at else None,
             "error": job.error_message if job.status == "failed" else None
         })
@@ -1183,6 +1190,13 @@ def create_app() -> Flask:
                 "progress_message": job.progress_message
             }), 400
 
+        # Safe JSON parsing for sub_queries
+        try:
+            sub_queries = json.loads(job.sub_queries) if job.sub_queries else []
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"Failed to parse sub_queries for job {job_id}: {job.sub_queries}")
+            sub_queries = []
+
         return jsonify({
             "ok": True,
             "job_id": job.id,
@@ -1190,7 +1204,7 @@ def create_app() -> Flask:
             "query": job.query,
             "result_report": job.result_report,
             "sources_count": job.sources_count,
-            "sub_queries": json.loads(job.sub_queries) if job.sub_queries else [],
+            "sub_queries": sub_queries,
             "created_at": job.created_at.isoformat() if job.created_at else None,
             "completed_at": job.completed_at.isoformat() if job.completed_at else None
         })
