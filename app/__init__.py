@@ -280,7 +280,8 @@ def create_app() -> Flask:
 
             gc: GeminiClient = current_app.extensions["gemini_client"]
             msgs = Message.query.filter_by(conversation_id=conversation_id).order_by(Message.id.asc()).all()
-            convo_dump = [{"role": m.sender, "content": m.content} for m in msgs][-100:]
+            # Gemini API: role は "user" または "model" である必要があります
+            convo_dump = [{"role": "model" if m.sender == "assistant" else "user", "content": m.content} for m in msgs][-100:]
 
             analysis = gc.analyze_conversation(convo_dump)
             new_summary = (analysis.get("summary") or "").strip()
@@ -805,7 +806,9 @@ def create_app() -> Flask:
         # 通常チャット
         gc: GeminiClient = current_app.extensions["gemini_client"]
         try:
-            history = [{"role": m.sender, "content": m.content}
+            # Gemini API: role は "user" または "model" である必要があります
+            # "assistant" は "model" に変換
+            history = [{"role": "model" if m.sender == "assistant" else "user", "content": m.content}
                        for m in Message.query.filter_by(conversation_id=cid).order_by(Message.id.asc()).all()][-50:]
             reply, used = gc.chat(history, msg, requested_model=(data.get("model") or "").strip())
         except GeminiFallbackError as e:
