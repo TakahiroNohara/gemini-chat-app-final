@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>ユーザー詳細 - {{ user.username }}</title>
+  <style>
+    body { font-family: "Noto Sans JP", system-ui, sans-serif; background:#f5f6f8; margin:0; }
+    header { background:#1976d2; color:#fff; padding:16px 24px; display:flex; justify-content:space-between; align-items:center; }
+    header h1 { margin:0; font-size:22px; }
+    header a { color:#fff; text-decoration:none; font-weight:bold; margin-left:16px; }
+    main { max-width:1100px; margin:24px auto; background:#fff; padding:20px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.08); }
+    h2 { border-left:5px solid #1976d2; padding-left:10px; margin-top:24px; font-size:18px; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th, td { border:1px solid #ddd; padding:8px; text-align:left; }
+    th { background:#f0f0f0; }
+    .stat-box { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:16px; margin-top:16px; }
+    .stat { background:#e3f2fd; padding:16px; border-radius:8px; text-align:center; }
+    .stat h3 { margin:0 0 8px; font-size:14px; color:#666; }
+    .stat p { margin:0; font-size:28px; font-weight:bold; color:#1976d2; }
+    .link-btn { background:#1976d2; color:#fff; text-decoration:none; padding:8px 12px; border-radius:6px; display:inline-block; margin-top:12px; }
+    .link-btn:hover { background:#0d47a1; }
+    .truncate { max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>👤 ユーザー詳細: {{ user.username }}</h1>
+    <nav>
+      <a href="{{ url_for('core.admin_dashboard') }}">📊 ダッシュボードへ戻る</a>
+      <a href="{{ url_for('auth.logout') }}">ログアウト</a>
+    </nav>
+  </header>
+
+  <main>
+    <a class="link-btn" href="{{ url_for('core.admin_dashboard') }}">🔙 管理者ダッシュボードへ戻る</a>
+
+    <!-- 基本情報 -->
+    <h2>📋 基本情報</h2>
+    <p><strong>ユーザーID:</strong> {{ user.id }}</p>
+    <p><strong>ユーザー名:</strong> {{ user.username }}</p>
+    <p><strong>管理者権限:</strong> {{ "✅ あり" if user.is_admin else "❌ なし" }}</p>
+
+    <!-- 使用統計 -->
+    <h2>📊 使用統計</h2>
+    <div class="stat-box">
+      <div class="stat">
+        <h3>総会話数</h3>
+        <p>{{ stats.total_conversations }}</p>
+      </div>
+      <div class="stat">
+        <h3>総メッセージ数</h3>
+        <p>{{ stats.total_messages }}</p>
+      </div>
+      <div class="stat">
+        <h3>ピン留め会話</h3>
+        <p>{{ stats.pinned_conversations }}</p>
+      </div>
+      <div class="stat">
+        <h3>Deep Research実行数</h3>
+        <p>{{ stats.deep_research_jobs }}</p>
+      </div>
+    </div>
+
+    <!-- 最近の会話 -->
+    <h2>💬 最近の会話（最新10件）</h2>
+    {% if conversations %}
+    <table>
+      <thead>
+        <tr>
+          <th>会話ID</th>
+          <th>タイトル</th>
+          <th>メッセージ数</th>
+          <th>ピン留め</th>
+          <th>作成日時</th>
+          <th>最終更新</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in conversations %}
+        <tr>
+          <td>{{ c.id }}</td>
+          <td class="truncate">{{ c.title }}</td>
+          <td>{{ c.message_count }}</td>
+          <td>{{ "📌" if c.is_pinned else "—" }}</td>
+          <td>{{ c.created_at.strftime('%Y-%m-%d %H:%M') if c.created_at else '—' }}</td>
+          <td>{{ c.updated_at.strftime('%Y-%m-%d %H:%M') if c.updated_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>会話履歴はありません。</p>
+    {% endif %}
+
+    <!-- Deep Research履歴 -->
+    <h2>🔬 Deep Research 履歴（最新10件）</h2>
+    {% if research_jobs %}
+    <table>
+      <thead>
+        <tr>
+          <th>ジョブID</th>
+          <th>クエリ</th>
+          <th>ステータス</th>
+          <th>フェーズ</th>
+          <th>作成日時</th>
+          <th>完了日時</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in research_jobs %}
+        <tr>
+          <td>{{ job.id }}</td>
+          <td class="truncate">{{ job.query }}</td>
+          <td>
+            {% if job.status == 'completed' %}
+              <span style="color:green;">✅ 完了</span>
+            {% elif job.status == 'failed' %}
+              <span style="color:red;">❌ 失敗</span>
+            {% elif job.status == 'pending' %}
+              <span style="color:orange;">⏳ 待機中</span>
+            {% else %}
+              <span style="color:blue;">🔄 {{ job.status }}</span>
+            {% endif %}
+          </td>
+          <td>{{ job.phase or '—' }}</td>
+          <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M') if job.created_at else '—' }}</td>
+          <td>{{ job.completed_at.strftime('%Y-%m-%d %H:%M') if job.completed_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>Deep Research の使用履歴はありません。</p>
+    {% endif %}
+  </main>
+</body>
+</html>
