@@ -84,7 +84,7 @@ services:
     runtime: python
     plan: free
     buildCommand: "./build.sh"
-    startCommand: "rq worker -u $REDIS_URL gemini-chat-queue --with-scheduler"
+    startCommand: "python run_worker.py"
     autoDeployOnPush: false  # 手動デプロイのみ（Webサービスではないため）
     envVars:
       # Python version
