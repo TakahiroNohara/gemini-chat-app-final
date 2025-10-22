@@ -206,14 +206,16 @@ def create_app() -> Flask:
     bcrypt = Bcrypt(app)
     app.extensions['bcrypt'] = bcrypt
 
-    # Limiter: Redisが無ければmemory://へ自動フォールバック
-    limiter_storage_uri, redis_ok = choose_redis_url_or_memory()
+    # Limiter: メモリ使用（Redis接続不安定性の回避）
+    # Render のFree プランでは Redis が不安定になることがあるため、
+    # Flask-Limiter は常にメモリストレージを使用する
     limiter = Limiter(
         key_func=get_remote_address,
         default_limits=["100/minute"],
-        storage_uri=limiter_storage_uri,
+        storage_uri="memory://",  # ← 常にメモリ使用に変更（Redis不要）
     )
     limiter.init_app(app)
+    logger.info("Flask-Limiter initialized with memory storage (Redis independent)")
 
     # RQ（Redisキュー）: RedisがOKのときだけ有効化
     if redis_ok:
