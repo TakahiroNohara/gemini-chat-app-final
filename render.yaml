@@ -77,11 +77,15 @@ services:
     ipAllowList: []  # 空 = すべてのIPを許可
 
   # RQ Worker (Deep Research background processing)
-  - type: background_worker
+  # Note: Render Free plan does not support background_worker type
+  # Using web service instead (httpPort will be ignored)
+  - type: web
     name: gemini-chat-worker
     runtime: python
     plan: free
+    buildCommand: "./build.sh"
     startCommand: "rq worker -u $REDIS_URL gemini-chat-queue --with-scheduler"
+    autoDeployOnPush: false  # 手動デプロイのみ（Webサービスではないため）
     envVars:
       # Python version
       - key: PYTHON_VERSION
