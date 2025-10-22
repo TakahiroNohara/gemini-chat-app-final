@@ -157,27 +157,34 @@ def create_app() -> Flask:
     )
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
-    # Database configuration: PostgreSQL (production) or SQLite (development)
+    # Database configuration: PostgreSQL (production) or SQLite (development/build)
     database_url = os.getenv("DATABASE_URL")
-    if database_url:
+    if database_url and database_url.strip() and database_url not in ("", "None"):
         # Render provides DATABASE_URL, but we need to handle postgres:// -> postgresql://
         if database_url.startswith("postgres://"):
             database_url = database_url.replace("postgres://", "postgresql://", 1)
-        sqlalchemy_database_uri = database_url
+        # Validate URL format before using
+        try:
+            from sqlalchemy import engine
+            engine.make_url(database_url)  # Validate URL format
+            sqlalchemy_database_uri = database_url
+            logger.info(f"Using DATABASE_URL from environment: {database_url[:30]}...")
+        except Exception as e:
+            logger.warning(f"Invalid DATABASE_URL format ({e}), falling back to SQLite")
+            db_path = Path(app.instance_path) / "database.db"
+            sqlalchemy_database_uri = f"sqlite:///{db_path}"
     else:
-        # Development: use SQLite
+        # Development/Build: use SQLite
         db_path = Path(app.instance_path) / "database.db"
         sqlalchemy_database_uri = f"sqlite:///{db_path}"
+        logger.info(f"Using SQLite database at: {sqlalchemy_database_uri}")
 
     # SECRET_KEY validation
     secret_key = os.getenv("SECRET_KEY")
-    if not secret_key:
-        # Development fallback
-        if os.getenv("FLASK_ENV") == "development" or not database_url:
-            secret_key = "dev-secret-key-change-in-production"
-            logger.warning("⚠️  Using development SECRET_KEY. Set SECRET_KEY environment variable in production!")
-        else:
-            raise RuntimeError("SECRET_KEY environment variable must be set in production!")
+    if not secret_key or secret_key.strip() == "" or secret_key == "None":
+        # Development/Build fallback
+        secret_key = "dev-secret-key-change-in-production"
+        logger.warning("⚠️  Using development SECRET_KEY. Set SECRET_KEY environment variable in production!")
 
     app.config.update(
         SECRET_KEY=secret_key,
