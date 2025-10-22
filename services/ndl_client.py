@@ -31,9 +31,11 @@ class NDLClient:
             root = ET.fromstring(xml_string)
             records = []
             for record in root.findall(".//rss/channel/item"):
+                link = record.find("link").text if record.find("link") is not None else None
                 records.append({
                     "title": record.find("title").text if record.find("title") is not None else None,
-                    "link": record.find("link").text if record.find("link") is not None else None,
+                    "link": link,
+                    "url": link,  # URLフィールドとしても利用できるようにする
                     "author": record.find("author").text if record.find("author") is not None else None,
                     "category": record.find("category").text if record.find("category") is not None else None,
                 })

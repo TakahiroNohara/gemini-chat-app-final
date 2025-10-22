@@ -90,6 +90,8 @@
           <th>ID</th>
           <th>ユーザー名</th>
           <th>管理者</th>
+          <th>会話数</th>
+          <th>メッセージ数</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -97,11 +99,18 @@
         {% for u in users %}
         <tr>
           <td>{{ u.id }}</td>
-          <td>{{ u.username }}</td>
-          <td>{{ "✅" if u.is_admin else "—" }}</td>
           <td>
+            <a href="{{ url_for('core.user_detail', user_id=u.id) }}" style="color:#1976d2; text-decoration:none; font-weight:bold;">
+              {{ u.username }}
+            </a>
+          </td>
+          <td>{{ "✅" if u.is_admin else "—" }}</td>
+          <td>{{ u.conversation_count if u.conversation_count is defined else 0 }}</td>
+          <td>{{ u.message_count if u.message_count is defined else 0 }}</td>
+          <td>
+            <a href="{{ url_for('core.user_detail', user_id=u.id) }}" class="link-btn" style="background:#0288d1; font-size:12px; padding:4px 8px; margin-right:6px;">詳細</a>
             {% if not u.is_admin %}
-            <form method="post" action="{{ url_for('core.delete_user', user_id=u.id) }}">
+            <form method="post" action="{{ url_for('core.delete_user', user_id=u.id) }}" style="display:inline;">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button type="submit" onclick="return confirm('ユーザーと関連データを削除します。よろしいですか？')">削除</button>
             </form>

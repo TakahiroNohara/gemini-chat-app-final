@@ -179,17 +179,25 @@ class GeminiClient:
         requested_model: str = "",
     ) -> Dict[str, Any]:
         """
-        検索結果を踏まえた要約
+        検索結果を踏まえた要約（enriched_content対応）
         """
         lines = [f"ユーザーの要望: {query}", "\n参考資料:"]
         for i, r in enumerate(search_results, 1):
             title = r.get("title", "")
-            url = r.get("url", "")
+            url = r.get("url", "") or r.get("link", "") or r.get("info_link", "")
             snip = r.get("snippet", "")
-            lines.append(f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n")
+            enriched = r.get("enriched_content", "")
+
+            # enriched_contentがあればそれを優先、なければsnippet
+            if enriched:
+                lines.append(f"[{i}] {title}\nURL: {url}\n詳細情報: {enriched}\n")
+            else:
+                lines.append(f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n")
+
         lines.append(
-            "\n指示: 上記の信頼できる情報のみを用いて、簡潔に日本語で要約してください。"
-            "不明点は『不明』と明記し、推測しないでください。最後に参考URLを列挙してください。"
+            "\n指示: 上記の信頼できる情報を最大限活用して、簡潔に日本語で要約してください。"
+            "直接的な情報がない場合でも、関連情報から合理的に推測できる内容は含めてください。"
+            "最後に参考URLを列挙してください。"
         )
         prompt = "\n".join(lines)
 
@@ -218,8 +226,8 @@ class GeminiClient:
 
         # WebFetch を実行する対象を選択（信頼できるドメイン優先）
         try:
-            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS
-            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS, USE_TRUSTED_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS if USE_TRUSTED_DOMAINS else []
         except ImportError:
             trusted_domains = ["amazon.co.jp", "hanmoto.com", "books.rakuten.co.jp"]
 
@@ -227,7 +235,7 @@ class GeminiClient:
         fetch_targets = []
         for r in search_results:
             url = r.get("url", "")
-            if any(domain in url for domain in trusted_domains):
+            if trusted_domains and any(domain in url for domain in trusted_domains):
                 fetch_targets.append(r)
                 if len(fetch_targets) >= max_fetch:
                     break
@@ -334,8 +342,8 @@ class GeminiClient:
         # 信頼できるソースを優先的にリスト化
         # app/constants.pyから信頼できるドメインリストを読み込む
         try:
-            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS
-            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS, USE_TRUSTED_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS if USE_TRUSTED_DOMAINS else []
         except ImportError:
             # フォールバック: constants.pyが存在しない場合
             logger.warning("app.constants not found, using hardcoded trusted domains")
@@ -349,18 +357,20 @@ class GeminiClient:
 
         for i, r in enumerate(enriched_results, 1):
             title = r.get("title", "")
-            url = r.get("url", "")
-            snip = r.get("snippet", "")
+            url = r.get("url", "") or r.get("link", "") or r.get("info_link", "")
+            snip = r.get("snippet", "") or r.get("description", "")
             enriched_content = r.get("enriched_content", "")
 
             # WebFetchで取得したコンテンツがある場合はそれを使用
             if enriched_content:
-                entry = f"[{i}] {title}\nURL: {url}\n詳細情報: {enriched_content}\n"
-            else:
+                entry = f"[{i}] {title}\nURL: {url}\n詳細情報（実際のWebページコンテンツ）: {enriched_content}\n"
+            elif snip:
                 entry = f"[{i}] {title}\nURL: {url}\n要旨: {snip}\n"
+            else:
+                entry = f"[{i}] {title}\nURL: {url}\n（詳細情報なし）\n"
 
             # 信頼できるドメインを優先
-            if any(domain in url for domain in trusted_domains):
+            if trusted_domains and any(domain in url for domain in trusted_domains):
                 trusted_sources.append(entry)
             else:
                 other_sources.append(entry)
@@ -374,19 +384,31 @@ class GeminiClient:
         lines.append("")
         lines.append("---")
         lines.append("")
-        lines.append("指示:")
-        lines.append("1. **信頼できる情報源を優先**: Amazon、楽天ブックス、版元ドットコムなどの大手書店・出版社の情報を最優先で参照してください。")
-        lines.append("2. **書籍の全体像を把握**: 参考資料から書籍のテーマ、対象読者、主要なメッセージを理解してください。")
-        lines.append("3. **目次構造に沿った要約**: ユーザーが提供した目次の各章について、以下の優先順位で要約を作成してください:")
-        lines.append("   a. 参考資料に明確に記載されている内容を使用")
-        lines.append("   b. 章タイトルと書籍全体のテーマから、その章で扱われている内容を**合理的に推論**")
-        lines.append("   c. 論語に関する一般的な知識と章タイトルを組み合わせて、**教育的な要約**を提供")
-        lines.append("4. **情報不足への対応**: 具体的な情報がない章でも、以下のように対応してください:")
-        lines.append("   - 「この章では、[章タイトル]について論語の教えを実践的に解説していると推測されます」")
-        lines.append("   - 「書籍全体のテーマから、この章では[推測される内容]について扱っていると考えられます」")
-        lines.append("5. **無関係な資料の除外**: 学術論文、大学パンフレット、無関係なレビューは無視してください。")
-        lines.append("6. **要約の有用性を優先**: 「情報不足」という回答は避け、可能な限り有用な要約を提供してください。")
-        lines.append("7. **参考情報源の明記**: 最後に、実際に参考にした情報源のURLを列挙してください。")
+        lines.append("## 重要な指示")
+        lines.append("")
+        lines.append("### 情報源の活用方針")
+        lines.append("1. **「詳細情報（実際のWebページコンテンツ）」を最優先で参照**: これは実際のWebページから取得した豊富なテキストです。書評、目次、内容紹介などが含まれている可能性が高いです。")
+        lines.append("2. **信頼できるドメインを優先**: Amazon、楽天ブックス、版元ドットコム、読書メーターなどの大手書店・書評サイトの情報を重視してください。")
+        lines.append("3. **複数の情報源を統合**: 断片的な情報でも、複数のソースを組み合わせることで全体像を把握してください。")
+        lines.append("")
+        lines.append("### 要約作成の戦略")
+        lines.append("4. **書籍全体のテーマを理解**: まず参考資料から書籍の主題、対象読者、著者の意図を把握してください。")
+        lines.append("5. **目次構造に沿った要約**: ユーザーが提供した目次の各章について、以下の優先順位で要約を作成:")
+        lines.append("   a. **直接的な情報**: 参考資料に明確に記載されている章の内容をそのまま使用")
+        lines.append("   b. **文脈からの推論**: 章タイトル + 書籍全体のテーマ + 著者の専門分野から、その章で扱われている内容を合理的に推論")
+        lines.append("   c. **一般知識の活用**: 書籍のテーマ（例：論語）に関する一般的な知識と章タイトルを組み合わせて、教育的な要約を提供")
+        lines.append("")
+        lines.append("### 情報不足時の対応（重要）")
+        lines.append("6. **「情報不足」は最後の手段**: 以下の順序で対応してください:")
+        lines.append("   - まず、Webページコンテンツに含まれる断片的な情報を探す")
+        lines.append("   - 次に、章タイトルから推測される内容を説明（例: 「この章では、[章タイトル]について論語の教えを実践的に解説していると推測されます」）")
+        lines.append("   - 著者の専門分野や書籍のテーマから、章の目的を推測（例: 「書籍全体のテーマから、この章では[推測される内容]を扱っていると考えられます」）")
+        lines.append("   - どうしても情報がない場合のみ「情報不足により詳細は不明」と記載")
+        lines.append("")
+        lines.append("### その他の注意事項")
+        lines.append("7. **無関係な資料の除外**: 学術論文、大学パンフレット、明らかに無関係なレビューは無視してください。")
+        lines.append("8. **有用性を最優先**: ユーザーに価値のある情報を提供することを最優先としてください。確実な情報が少なくても、合理的な推測を含めた有用な要約を作成してください。")
+        lines.append("9. **参考情報源の明記**: 最後に「## 参考情報源」セクションで、実際に参照したURLを列挙してください。")
         lines.append("")
         lines.append("出力形式:")
         lines.append("```")

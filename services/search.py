@@ -101,8 +101,8 @@ class SearchClient:
 
         # 信頼できるドメインリストを取得
         try:
-            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS
-            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS, USE_TRUSTED_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS if USE_TRUSTED_DOMAINS else []
         except ImportError:
             logger.warning("app.constants not found, using hardcoded trusted domains")
             trusted_domains = [
@@ -139,7 +139,7 @@ class SearchClient:
                 query += f" {author}"
             layer1_queries.append((query, domain))
 
-        with ThreadPoolExecutor(max_workers=len(layer1_queries)) as executor:
+        with ThreadPoolExecutor(max_workers=(len(layer1_queries) or 1)) as executor:
             futures = {
                 executor.submit(
                     self.search,
@@ -303,6 +303,22 @@ class SearchClient:
         author: Optional[str] = None,
         top_k: int = 10,
     ) -> List[Dict[str, Any]]:
+        """
+        Hybrid書籍検索戦略：構造化データ + Web検索 + コンテンツ取得
+
+        Layer 1: Google Books API（構造化メタデータ）
+        Layer 2: NDL API（国会図書館公式データ）
+        Layer 3: 信頼できるドメインのWeb検索（書評・レビュー）
+        Layer 4: WebFetchでコンテンツ強化（上位3件）
+
+        Args:
+            book_title: 書籍タイトル
+            author: 著者名（任意）
+            top_k: 取得する検索結果数
+
+        Returns:
+            正規化された検索結果のリスト（enriched_contentを含む）
+        """
         if not (book_title or "").strip():
             raise SearchError("book_title is required")
 
@@ -312,35 +328,282 @@ class SearchClient:
         def _add_unique(results: List[Dict[str, Any]]) -> int:
             added = 0
             for r in results:
-                url = r.get("info_link") or r.get("link")
+                url = r.get("info_link") or r.get("link") or r.get("url")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     all_results.append(r)
                     added += 1
             return added
 
-        # --- Layer 1: Google Books API ---
-        logger.info(f"[Book Search V2 Layer 1] Searching Google Books for: {book_title}")
-        query = f"{book_title}"
-        if author:
-            query += f" {author}"
-        try:
-            google_books_results = self.google_books_client.search_books(query, max_results=top_k)
-            added = _add_unique(google_books_results)
-            logger.info(f"[Layer 1] Google Books: {len(google_books_results)} results ({added} new)")
-        except Exception as e:
-            logger.warning(f"[Layer 1] Google Books failed: {e}")
+        # --- Layer 1: Google Books API（構造化データ） ---
+        # Lazy initialization with failure caching
+        if not hasattr(self, '_google_books_init_failed'):
+            self._google_books_init_failed = False
 
-        # --- Layer 2: NDL API ---
+        if not self._google_books_init_failed and (not hasattr(self, 'google_books_client') or self.google_books_client is None):
+            try:
+                self.google_books_client = GoogleBooksClient(api_key=self.env.get("GOOGLE_API_KEY"))
+                logger.info("[Book Search V2] Google Books client initialized")
+            except Exception as e:
+                logger.warning(f"[Book Search V2] Google Books client init failed: {e}")
+                self.google_books_client = None
+                self._google_books_init_failed = True  # Cache failure
+
+        logger.info(f"[Book Search V2 Layer 1] Searching Google Books for: {book_title}")
+        if self.google_books_client and not self._google_books_init_failed:
+            query = f"{book_title}"
+            if author:
+                query += f" {author}"
+            try:
+                google_books_results = self.google_books_client.search_books(query, max_results=top_k)
+                added = _add_unique(google_books_results)
+                logger.info(f"[Layer 1] Google Books: {len(google_books_results)} results ({added} new)")
+            except Exception as e:
+                logger.warning(f"[Layer 1] Google Books failed: {e}")
+        else:
+            logger.warning("[Layer 1] Google Books client not available, skipping")
+
+        # --- Layer 2: NDL API（国会図書館） ---
+        # Lazy initialization with failure caching
+        if not hasattr(self, '_ndl_init_failed'):
+            self._ndl_init_failed = False
+
+        if not self._ndl_init_failed and (not hasattr(self, 'ndl_client') or self.ndl_client is None):
+            try:
+                self.ndl_client = NDLClient()
+                logger.info("[Book Search V2] NDL client initialized")
+            except Exception as e:
+                logger.warning(f"[Book Search V2] NDL client init failed: {e}")
+                self.ndl_client = None
+                self._ndl_init_failed = True  # Cache failure
+
         logger.info(f"[Book Search V2 Layer 2] Searching NDL for: {book_title}")
+        if self.ndl_client and not self._ndl_init_failed:
+            try:
+                ndl_results = self.ndl_client.search_books(book_title, max_records=top_k)
+                added = _add_unique(ndl_results)
+                logger.info(f"[Layer 2] NDL: {len(ndl_results)} results ({added} new)")
+            except Exception as e:
+                logger.warning(f"[Layer 2] NDL failed: {e}")
+        else:
+            logger.warning("[Layer 2] NDL client not available, skipping")
+
+        # --- Layer 3: 信頼できるドメインでのWeb検索（並列実行） ---
         try:
-            ndl_results = self.ndl_client.search_books(book_title, max_records=top_k)
-            added = _add_unique(ndl_results)
-            logger.info(f"[Layer 2] NDL: {len(ndl_results)} results ({added} new)")
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS, USE_TRUSTED_DOMAINS
+            if USE_TRUSTED_DOMAINS:
+                logger.info(f"[Book Search V2 Layer 3] Searching trusted web domains in parallel")
+                base_query = f'"{book_title}"'
+                if author:
+                    base_query += f' "{author}"'
+                layer3_queries = [f"{base_query} site:{domain}" for domain in TRUSTED_BOOK_SOURCES_DOMAINS]
+                with ThreadPoolExecutor(max_workers=len(layer3_queries)) as executor:
+                    future_to_query = {executor.submit(self.search, q, top_k=2, gl="jp", lr="lang_ja"): q for q in layer3_queries}
+                    for future in as_completed(future_to_query):
+                        query = future_to_query[future]
+                        try:
+                            results = future.result()
+                            added = _add_unique(results)
+                            logger.info(f"[Layer 3] Query '{query}' found {len(results)} results ({added} new).")
+                        except Exception as exc:
+                            logger.warning(f"[Layer 3] Query '{query}' generated an exception: {exc}")
+            else:
+                logger.info("[Book Search V2 Layer 3] Skipped trusted-domain search (disabled)")
         except Exception as e:
-            logger.warning(f"[Layer 2] NDL failed: {e}")
+            logger.warning(f"[Layer 3] Web search failed: {e}")
+
+        logger.info(f"[Book Search V2] Total results before WebFetch: {len(all_results)}")
+
+        # --- Layer 4: WebFetchでコンテンツ強化 ---
+        if all_results:
+            logger.info(f"[Book Search V2 Layer 4] Enriching top results with WebFetch")
+            all_results = self._enrich_book_search_results(all_results, max_fetch=3)
 
         return all_results[:top_k]
+
+    def _enrich_book_search_results(
+        self,
+        search_results: List[Dict[str, Any]],
+        max_fetch: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        書籍検索結果を WebFetch で強化（実際のHTMLコンテンツを取得）
+
+        Args:
+            search_results: 検索結果リスト
+            max_fetch: WebFetch を実行する最大件数（デフォルト3件）
+
+        Returns:
+            enriched_content フィールドを追加した検索結果
+        """
+        import requests
+        import re
+
+        # 信頼できるドメインリストを取得
+        try:
+            from app.constants import TRUSTED_BOOK_SOURCES_DOMAINS, USE_TRUSTED_DOMAINS
+            trusted_domains = TRUSTED_BOOK_SOURCES_DOMAINS if USE_TRUSTED_DOMAINS else []
+        except ImportError:
+            trusted_domains = [
+                "amazon.co.jp", "hanmoto.com", "books.rakuten.co.jp",
+                "bookmeter.com", "booklog.jp", "honz.jp"
+            ]
+
+        enriched_results = []
+
+        # 信頼できるドメインを優先的に選択
+        fetch_targets = []
+        if trusted_domains:
+            for r in search_results:
+                url = r.get("url") or r.get("link") or r.get("info_link") or ""
+                if any(domain in url for domain in trusted_domains):
+                    fetch_targets.append(r)
+                    if len(fetch_targets) >= max_fetch:
+                        break
+
+        # 信頼できるドメインが不足している場合は他の結果も追加
+        if len(fetch_targets) < max_fetch:
+            for r in search_results:
+                if r not in fetch_targets:
+                    fetch_targets.append(r)
+                    if len(fetch_targets) >= max_fetch:
+                        break
+
+        def fetch_content(result: Dict[str, Any]) -> Dict[str, Any]:
+            """単一URLのコンテンツを取得"""
+            url = result.get("url") or result.get("link") or result.get("info_link") or ""
+            if not url:
+                return result
+
+            try:
+                # 簡易的なHTML取得（タイムアウト10秒）
+                response = requests.get(url, timeout=10, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; BookSummaryBot/1.0)"
+                })
+                if response.status_code == 200:
+                    html = response.text
+                    # scriptとstyleタグを除去
+                    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    # HTMLタグを除去
+                    text = re.sub(r'<[^>]+>', ' ', html)
+                    # 連続する空白を1つに
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    # 最大3000文字に制限（書籍情報は長めに）
+                    enriched_text = text[:3000] if len(text) > 3000 else text
+
+                    result_copy = result.copy()
+                    result_copy["enriched_content"] = enriched_text
+                    # URLフィールドを正規化
+                    if "url" not in result_copy:
+                        result_copy["url"] = url
+                    logger.info(f"WebFetch success for {url[:60]}... (fetched {len(enriched_text)} chars)")
+                    return result_copy
+                else:
+                    logger.warning(f"WebFetch failed for {url}: HTTP {response.status_code}")
+                    return result
+            except Exception as e:
+                logger.warning(f"WebFetch failed for {url}: {e}")
+                return result
+
+        # 並列でWebFetch実行
+        with ThreadPoolExecutor(max_workers=min(3, len(fetch_targets))) as executor:
+            futures = {executor.submit(fetch_content, r): r for r in fetch_targets}
+            for future in as_completed(futures):
+                try:
+                    enriched_result = future.result()
+                    enriched_results.append(enriched_result)
+                except Exception as e:
+                    logger.error(f"WebFetch thread error: {e}")
+                    # エラー時は元の結果をそのまま追加
+                    original = futures[future]
+                    enriched_results.append(original)
+
+        # WebFetch対象外の結果も追加
+        for r in search_results:
+            if r not in fetch_targets:
+                enriched_results.append(r)
+
+        return enriched_results
+
+    def _enrich_search_results_with_webfetch(
+        self,
+        search_results: List[Dict[str, Any]],
+        max_fetch: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        一般検索結果を WebFetch で強化（実際のHTMLコンテンツを取得）
+        Deep Research用の汎用メソッド
+
+        Args:
+            search_results: 検索結果リスト
+            max_fetch: WebFetch を実行する最大件数（デフォルト3件）
+
+        Returns:
+            enriched_content フィールドを追加した検索結果
+        """
+        import requests
+        import re
+
+        enriched_results = []
+        fetch_targets = search_results[:max_fetch]
+
+        def fetch_content(result: Dict[str, Any]) -> Dict[str, Any]:
+            """単一URLのコンテンツを取得"""
+            url = result.get("url") or result.get("link") or ""
+            if not url:
+                return result
+
+            try:
+                # 簡易的なHTML取得（タイムアウト10秒）
+                response = requests.get(url, timeout=10, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; DeepResearchBot/1.0)"
+                })
+                if response.status_code == 200:
+                    html = response.text
+                    # scriptとstyleタグを除去
+                    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                    # HTMLタグを除去
+                    text = re.sub(r'<[^>]+>', ' ', html)
+                    # 連続する空白を1つに
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    # 最大2000文字に制限（Deep Research用）
+                    enriched_text = text[:2000] if len(text) > 2000 else text
+
+                    result_copy = result.copy()
+                    result_copy["enriched_content"] = enriched_text
+                    # URLフィールドを正規化
+                    if "url" not in result_copy and "link" in result_copy:
+                        result_copy["url"] = result_copy["link"]
+                    logger.info(f"[DeepResearch] WebFetch success for {url[:60]}... ({len(enriched_text)} chars)")
+                    return result_copy
+                else:
+                    logger.warning(f"[DeepResearch] WebFetch failed for {url}: HTTP {response.status_code}")
+                    return result
+            except Exception as e:
+                logger.warning(f"[DeepResearch] WebFetch failed for {url}: {e}")
+                return result
+
+        # 並列でWebFetch実行
+        with ThreadPoolExecutor(max_workers=min(3, len(fetch_targets))) as executor:
+            futures = {executor.submit(fetch_content, r): r for r in fetch_targets}
+            for future in as_completed(futures):
+                try:
+                    enriched_result = future.result()
+                    enriched_results.append(enriched_result)
+                except Exception as e:
+                    logger.error(f"[DeepResearch] WebFetch thread error: {e}")
+                    # エラー時は元の結果をそのまま追加
+                    original = futures[future]
+                    enriched_results.append(original)
+
+        # WebFetch対象外の結果も追加
+        for r in search_results:
+            if r not in fetch_targets:
+                enriched_results.append(r)
+
+        return enriched_results
 
     # ---------------- HTTP helper ----------------
     def _http_get_json(self, url: str, params: dict) -> dict:

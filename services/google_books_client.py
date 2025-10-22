@@ -34,13 +34,16 @@ class GoogleBooksClient:
         normalized = []
         for item in items:
             volume_info = item.get("volumeInfo", {})
+            description = volume_info.get("description", "")
             normalized.append({
                 "title": volume_info.get("title"),
                 "authors": volume_info.get("authors", []),
                 "publisher": volume_info.get("publisher"),
                 "published_date": volume_info.get("publishedDate"),
-                "description": volume_info.get("description"),
+                "description": description,
+                "snippet": description,  # snippetとしても利用できるようにする
                 "thumbnail": volume_info.get("imageLinks", {}).get("thumbnail"),
                 "info_link": volume_info.get("infoLink"),
+                "url": volume_info.get("infoLink"),  # URLフィールドとしても利用できるようにする
             })
         return normalized
