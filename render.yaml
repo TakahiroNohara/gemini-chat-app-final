@@ -9,7 +9,7 @@ services:
     envVars:
       # Python version
       - key: PYTHON_VERSION
-        value: 3.12
+        value: 3.12.1
 
       # Flask settings
       - key: SECRET_KEY
@@ -89,7 +89,7 @@ services:
     envVars:
       # Python version
       - key: PYTHON_VERSION
-        value: 3.12
+        value: 3.12.1
 
       # Database (PostgreSQL接続は自動設定)
       - key: DATABASE_URL
