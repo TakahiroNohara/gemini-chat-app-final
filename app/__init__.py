@@ -124,6 +124,8 @@ def _summarize_with_citations(gc, query: str, results: List[Dict[str, Any]], req
 def choose_redis_url_or_memory() -> tuple[str, bool]:
     """
     REDIS_URL が使えればそれを返す。接続不可なら ('memory://', False) を返す。
+    Render のスタートアップ時に Redis が遅延起動することがあるため、
+    長めのタイムアウト（5秒）を設定。
     """
     redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
     if not redis_url:
@@ -131,7 +133,8 @@ def choose_redis_url_or_memory() -> tuple[str, bool]:
         return "memory://", False
 
     try:
-        conn = redis_lib.from_url(redis_url, socket_connect_timeout=0.2, socket_timeout=0.2)
+        # Render での遅延初期化に対応: 5秒のタイムアウト
+        conn = redis_lib.from_url(redis_url, socket_connect_timeout=5, socket_timeout=5)
         conn.ping()  # quick health check
         logger.info("Redis is available -> using Redis for limiter/RQ.")
         return redis_url, True
@@ -215,9 +218,15 @@ def create_app() -> Flask:
     # RQ（Redisキュー）: RedisがOKのときだけ有効化
     if redis_ok:
         try:
-            rq_conn = redis_lib.from_url(os.getenv("REDIS_URL") or os.getenv("VALKEY_URL"))
+            # Render での遅延初期化に対応: 5秒のタイムアウト
+            rq_conn = redis_lib.from_url(
+                os.getenv("REDIS_URL") or os.getenv("VALKEY_URL"),
+                socket_connect_timeout=5,
+                socket_timeout=5
+            )
             rq_queue = Queue("default", connection=rq_conn, default_timeout=180)
             app.extensions["rq_queue"] = rq_queue
+            logger.info("RQ queue initialized successfully")
         except Exception as e:
             logger.warning(f"RQ init failed -> disable queue. reason={e}")
             app.extensions["rq_queue"] = None
