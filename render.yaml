@@ -91,6 +91,10 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.1
 
+      # Secret key (auto-generate for Worker service)
+      - key: SECRET_KEY
+        generateValue: true
+
       # Database (PostgreSQL接続は自動設定)
       - key: DATABASE_URL
         fromDatabase:
