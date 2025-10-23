@@ -84,7 +84,7 @@ services:
   - type: web
     name: gemini-chat-worker
     runtime: python
-    region: oregon  # Web Service と同じリージョン、Redis との内部通信を確保
+    region: oregon  # Redis（Oregon）との内部通信を確保 - Singapore ではなく Oregon にデプロイ
     plan: free
     buildCommand: "bash ./build.sh"
     startCommand: "python run_worker.py"
