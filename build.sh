@@ -16,9 +16,10 @@ if [ -z "$SECRET_KEY" ]; then
 fi
 
 if [ -z "$DATABASE_URL" ]; then
-    # Use SQLite for Worker service build (PostgreSQL will be available at runtime)
-    export DATABASE_URL="sqlite:///./instance/build.db"
-    echo "⚙️ Using temporary SQLite DATABASE_URL for build (Worker service)..."
+    # Use dummy PostgreSQL URL for Worker service build
+    # (Actual PostgreSQL will be available at runtime via Render's automatic configuration)
+    export DATABASE_URL="postgresql://dummy:dummy@localhost/dummy"
+    echo "⚙️ Using dummy PostgreSQL DATABASE_URL for build (Worker service)..."
 fi
 
 # マイグレーション実行

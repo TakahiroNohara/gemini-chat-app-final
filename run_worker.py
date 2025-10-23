@@ -123,6 +123,8 @@ def main():
 
     if not redis_conn:
         logger.error("❌ Failed to establish Redis connection")
+        logger.error(f"Please ensure REDIS_URL is set correctly in Render environment variables.")
+        logger.error(f"Expected format: redis://[password@]host:port or rediss://...")
         sys.exit(1)
 
     # RQ Queue を作成
