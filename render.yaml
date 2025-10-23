@@ -3,7 +3,7 @@ services:
   - type: web
     name: gemini-chat-app
     runtime: python
-    region: oregon  # Render free プランでのデフォルトリージョン（Redis と同じ）
+    region: singapore  # Worker と同じリージョン、Redis 再作成時に同じリージョンで
     plan: free  # または starter, standard など
     buildCommand: "bash ./build.sh"
     startCommand: "gunicorn -c gunicorn.conf.py wsgi:app"
@@ -74,7 +74,7 @@ services:
   # PostgreSQL Database
   - type: pserv
     name: gemini-chat-db
-    region: oregon  # Web/Worker Service と同じリージョン、内部通信を確保
+    region: singapore  # Web/Worker Service と同じリージョン
     plan: free  # または starter
     ipAllowList: []  # 空 = すべてのIPを許可
 
@@ -84,7 +84,7 @@ services:
   - type: web
     name: gemini-chat-worker
     runtime: python
-    region: oregon  # Redis（Oregon）との内部通信を確保 - Singapore ではなく Oregon にデプロイ
+    region: singapore  # Web Service, PostgreSQL, Redis と同じリージョン
     plan: free
     buildCommand: "bash ./build.sh"
     startCommand: "python run_worker.py"
@@ -140,7 +140,7 @@ services:
   # Redis
   - type: redis
     name: gemini-chat-redis
-    region: oregon  # Web/Worker Service, PostgreSQL と同じリージョン
+    region: singapore  # Web/Worker/PostgreSQL と同じリージョン
     plan: free  # または starter
     ipAllowList: []  # 空 = すべてのIPを許可
     maxmemoryPolicy: allkeys-lru  # メモリ制限に達したとき、最後にアクセスされたキーを削除
