@@ -68,7 +68,7 @@ services:
         fromService:
           type: redis
           name: gemini-chat-redis
-          property: connectionString
+          property: internalConnectionString
 
   # PostgreSQL Database
   - type: pserv
@@ -106,7 +106,7 @@ services:
         fromService:
           type: redis
           name: gemini-chat-redis
-          property: connectionString
+          property: internalConnectionString
 
       # Gemini API (これらは手動で設定してください)
       - key: GEMINI_API_KEY
