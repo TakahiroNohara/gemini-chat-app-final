@@ -115,7 +115,7 @@ def main():
     # このホスト名がデプロイごとに変わる可能性があるため、あくまで一時的なデバッグ手段とする
     if "red-d3mdth6r433s73aj45j0" in redis_url:
         logger.warning("⚠️  Temporary workaround: Replacing unresolvable Redis hostname.")
-        redis_url = redis_url.replace("red-d3mdth6r433s73aj45j0", "gemini-chat-redis")
+        redis_url = redis_url.replace("red-d3mdth6r433s73aj45j0", "gemini-chat-redis-discovery")
         logger.info(f"DEBUG: Modified REDIS_URL for connection: {redis_url}")
 
     # Redis に接続（環境変数で設定可能）
