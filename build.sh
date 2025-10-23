@@ -15,16 +15,20 @@ if [ -z "$SECRET_KEY" ]; then
     echo "⚙️ Using temporary SECRET_KEY for build..."
 fi
 
-# Check if DATABASE_URL is set by Render (Web service only)
-# Worker service doesn't get DATABASE_URL during build phase
-if [ -n "$DATABASE_URL" ]; then
-    # Only run migrations if DATABASE_URL is properly set (Web service case)
+# Check if this is a Worker service build by looking at START_COMMAND or service name
+# Worker service has startCommand: "python run_worker.py"
+# Web service has startCommand: "gunicorn -c gunicorn.conf.py wsgi:app"
+if [ "$RUN_COMMAND" = "python run_worker.py" ] || [ "$RUN_WORKER" = "true" ]; then
+    # Worker service build: skip migrations (they'll run via Web service only)
+    echo "⊙ Skipping database migrations (Worker build phase)"
+elif [ -n "$DATABASE_URL" ]; then
+    # Web service build: run migrations
     echo "📦 Running database migrations with configured DATABASE_URL..."
     flask db upgrade
     echo "✅ Database migrations completed"
 else
-    # Worker service build: skip migrations (they'll run via Web service)
-    echo "⊙ Skipping database migrations (Worker build phase - no DATABASE_URL)"
+    # No DATABASE_URL and not a worker: skip migrations
+    echo "⊙ Skipping database migrations (no DATABASE_URL)"
 fi
 
 echo "✅ Build completed successfully!"
