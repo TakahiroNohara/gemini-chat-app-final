@@ -111,6 +111,13 @@ def main():
 
     logger.info(f"DEBUG: Raw REDIS_URL from environment: {redis_url}")
 
+    # 一時的な回避策: RenderのinternalConnectionStringが解決できないホスト名を返す問題への対応
+    # このホスト名がデプロイごとに変わる可能性があるため、あくまで一時的なデバッグ手段とする
+    if "red-d3mdth6r433s73aj45j0" in redis_url:
+        logger.warning("⚠️  Temporary workaround: Replacing unresolvable Redis hostname.")
+        redis_url = redis_url.replace("red-d3mdth6r433s73aj45j0", "gemini-chat-redis")
+        logger.info(f"DEBUG: Modified REDIS_URL for connection: {redis_url}")
+
     # Redis に接続（環境変数で設定可能）
     redis_conn = connect_to_redis(redis_url, max_retries=MAX_RETRIES, initial_backoff=RETRY_BACKOFF)
 
