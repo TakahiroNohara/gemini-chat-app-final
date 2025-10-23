@@ -109,6 +109,8 @@ def main():
         logger.error("❌ REDIS_URL or VALKEY_URL environment variable not set")
         sys.exit(1)
 
+    logger.info(f"DEBUG: Raw REDIS_URL from environment: {redis_url}")
+
     # Redis に接続（環境変数で設定可能）
     redis_conn = connect_to_redis(redis_url, max_retries=MAX_RETRIES, initial_backoff=RETRY_BACKOFF)
 
