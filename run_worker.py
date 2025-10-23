@@ -6,9 +6,12 @@ Python から直接 RQ ワーカーを起動する
 """
 import os
 import sys
+import time
 import logging
+from typing import Optional, Tuple
 from rq import Worker, Queue
 import redis
+from redis.client import Redis
 
 # ロギング設定
 logging.basicConfig(
@@ -17,36 +20,100 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 環境変数から設定を読み込む（デフォルト値を持つ）
+MAX_RETRIES = int(os.getenv("RQ_MAX_RETRIES", "5"))
+RETRY_BACKOFF = int(os.getenv("RQ_RETRY_BACKOFF", "2"))
+
+def validate_redis_url_format(redis_url: Optional[str]) -> Tuple[bool, Optional[str]]:
+    """
+    Redis URL が有効な形式かチェック
+
+    Args:
+        redis_url: チェック対象の Redis URL
+
+    Returns:
+        (is_valid, error_message) タプル
+        - is_valid: URL 形式が有効な場合は True
+        - error_message: エラーメッセージ（エラーがない場合は None）
+    """
+    if not redis_url:
+        return False, "REDIS_URL is empty"
+
+    if not (redis_url.startswith("redis://") or redis_url.startswith("rediss://") or redis_url.startswith("unix://")):
+        return False, f"REDIS_URL must start with redis://, rediss://, or unix://. Got: {redis_url[:50]}"
+
+    return True, None
+
+def connect_to_redis(redis_url: str, max_retries: int = 5, initial_backoff: int = 2) -> Optional[Redis]:
+    """
+    Redis に接続（リトライロジック付き）
+
+    設定エラー（無効な URL）：即座に None を返す
+    ネットワークエラー（一時的な接続失敗）：指数バックオフでリトライ
+
+    Args:
+        redis_url: Redis の接続 URL（redis://, rediss://, unix:// スキーム）
+        max_retries: 最大リトライ回数（デフォルト: 5回）
+        initial_backoff: 初期バックオフ時間（秒、デフォルト: 2秒）
+                        指数バックオフにより倍々で増加（最大30秒）
+
+    Returns:
+        接続に成功した場合は Redis クライアント、失敗した場合は None
+
+    Environment Variables:
+        RQ_MAX_RETRIES: 最大リトライ回数（デフォルト: 5）
+        RQ_RETRY_BACKOFF: 初期バックオフ時間（デフォルト: 2秒）
+    """
+    # ステップ1：URL 形式を検証（設定エラーチェック）
+    is_valid, error_msg = validate_redis_url_format(redis_url)
+    if not is_valid:
+        logger.error(f"❌ Invalid REDIS_URL format: {error_msg}")
+        logger.error(f"Full URL: {redis_url}")
+        return None  # 設定エラーは exit させない（呼び出し側で処理）
+
+    # ステップ2：Redis に接続（ネットワークエラーはリトライ）
+    logger.info(f"Connecting to Redis: {redis_url[:50]}...")
+
+    backoff = initial_backoff
+    for attempt in range(1, max_retries + 1):
+        try:
+            redis_conn = redis.from_url(
+                redis_url,
+                socket_connect_timeout=5,
+                socket_timeout=5,
+                decode_responses=True
+            )
+            redis_conn.ping()
+            logger.info(f"✅ Redis connection established (attempt {attempt}/{max_retries})")
+            return redis_conn
+        except redis.exceptions.ConnectionError as e:
+            if attempt < max_retries:
+                logger.warning(f"⚠️  Connection failed (attempt {attempt}/{max_retries}): {e}")
+                logger.warning(f"   Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)  # Exponential backoff, max 30s
+            else:
+                logger.error(f"❌ Failed to connect to Redis after {max_retries} attempts: {e}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Unexpected error connecting to Redis: {e}")
+            return None
+
+    return None
+
 def main():
     # Redis URL を環境変数から取得
     redis_url = os.getenv("REDIS_URL") or os.getenv("VALKEY_URL")
 
     if not redis_url:
-        logger.error("REDIS_URL or VALKEY_URL environment variable not set")
+        logger.error("❌ REDIS_URL or VALKEY_URL environment variable not set")
         sys.exit(1)
 
-    # Redis URL が valid な形式かチェック
-    if not (redis_url.startswith("redis://") or redis_url.startswith("rediss://") or redis_url.startswith("unix://")):
-        logger.error(f"❌ Invalid REDIS_URL format: {redis_url[:50]}...")
-        logger.error("REDIS_URL must start with redis://, rediss://, or unix://")
-        logger.error(f"Full URL: {redis_url}")
-        sys.exit(1)
+    # Redis に接続（環境変数で設定可能）
+    redis_conn = connect_to_redis(redis_url, max_retries=MAX_RETRIES, initial_backoff=RETRY_BACKOFF)
 
-    logger.info(f"Connecting to Redis: {redis_url[:50]}...")
-
-    try:
-        # Redis 接続
-        redis_conn = redis.from_url(
-            redis_url,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            decode_responses=True
-        )
-        redis_conn.ping()
-        logger.info("✅ Redis connection established")
-    except Exception as e:
-        logger.error(f"❌ Failed to connect to Redis: {e}")
-        logger.error(f"REDIS_URL was: {redis_url[:50]}...")
+    if not redis_conn:
+        logger.error("❌ Failed to establish Redis connection")
         sys.exit(1)
 
     # RQ Queue を作成
