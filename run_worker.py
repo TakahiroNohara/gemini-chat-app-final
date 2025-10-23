@@ -134,6 +134,39 @@ def main():
     logger.info("Starting RQ worker on queue 'default'...")
     worker = Worker([queue], connection=redis_conn)
 
+    # Render が Web Service のポート検出用にダミーサーバーをバックグラウンドで起動
+    # （Worker は HTTP ポートを使わないが、Render のポート検出要件を満たすため）
+    def start_dummy_server():
+        """Render のポート検出を満たすためのダミー HTTP サーバー"""
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+
+        class HealthCheckHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"OK")
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                # ログを抑制
+                pass
+
+        port = int(os.getenv("PORT", "8080"))
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"Health check server listening on port {port}")
+
+        # バックグラウンドで実行
+        import threading
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+    # ダミーサーバーを起動
+    start_dummy_server()
+
     try:
         worker.work(with_scheduler=True)
     except KeyboardInterrupt:
